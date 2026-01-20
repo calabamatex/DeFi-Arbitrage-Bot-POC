@@ -1,0 +1,18 @@
+{
+  "name": "arbitrage",
+  "version": "1.0.0",
+  "description": "> **Advanced Multi-Chain Arbitrage Trading Bot with Flash Loan Integration**",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@aave/core-v3": "^1.19.3",
+    "@nomicfoundation/hardhat-toolbox": "^6.1.0",
+    "@openzeppelin/contracts": "^5.4.0",
+    "hardhat": "^3.1.5"
+  }
+}
