@@ -96,7 +96,7 @@ class Opportunity(Base):
     rejection_reason = Column(Text, nullable=True)
 
     # Metadata
-    metadata = Column(JSONB, nullable=True)
+    extra_data = Column(JSONB, nullable=True)
 
     # Timestamps
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

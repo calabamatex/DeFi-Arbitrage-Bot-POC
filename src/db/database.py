@@ -3,7 +3,7 @@ Database connection and session management
 """
 from contextlib import contextmanager
 from typing import Generator
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 
@@ -97,7 +97,7 @@ def check_db_connection() -> bool:
     """
     try:
         with get_db() as db:
-            db.execute("SELECT 1")
+            db.execute(text("SELECT 1"))
         return True
     except Exception as e:
         print(f"❌ Database connection failed: {e}")
@@ -121,12 +121,12 @@ if __name__ == "__main__":
     # Verify tables were created
     with get_db() as db:
         result = db.execute(
-            """
-            SELECT table_name
-            FROM information_schema.tables
-            WHERE table_schema = 'public'
-            ORDER BY table_name
-            """
+            text("""
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                ORDER BY table_name
+            """)
         )
         tables = [row[0] for row in result]
 
