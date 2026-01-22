@@ -237,7 +237,9 @@ def main():
         web3=web3,
         min_profit_usd=float(os.getenv("MIN_PROFIT_USD", "1.0")),
         max_gas_price_gwei=int(os.getenv("MAX_GAS_PRICE_GWEI", "100")),
-        check_interval=int(os.getenv("CHECK_INTERVAL", "5"))
+        check_interval=int(os.getenv("CHECK_INTERVAL", "5")),
+        min_flash_loan=int(os.getenv("MIN_FLASH_LOAN_USD", "500")) * 10**6,  # Convert USD to USDC units
+        max_flash_loan=int(os.getenv("MAX_FLASH_LOAN_USD", "100000")) * 10**6
     )
     logger.info("✅ Detector initialized")
 

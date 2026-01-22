@@ -1,0 +1,15 @@
+{
+  "network": "Polygon Mainnet",
+  "chainId": 137,
+  "timestamp": 1769104956,
+  "contracts": {
+    "FlashLoanArbitrageV2": "0xe03CC16F647c367aA40d6939b4238Bd32026fdC3",
+    "UniswapV3AdapterFixed": "0xf463460111aBa6486F0E589D057a9dc2fA84E185",
+    "UniswapV2Adapter": "0x96fd41afD70d349DCF64b50B5Eb08a8b31707734"
+  },
+  "polygonscan": {
+    "FlashLoanArbitrageV2": "https://polygonscan.com/address/0xe03CC16F647c367aA40d6939b4238Bd32026fdC3",
+    "UniswapV3AdapterFixed": "https://polygonscan.com/address/0xf463460111aBa6486F0E589D057a9dc2fA84E185",
+    "UniswapV2Adapter": "https://polygonscan.com/address/0x96fd41afD70d349DCF64b50B5Eb08a8b31707734"
+  }
+}

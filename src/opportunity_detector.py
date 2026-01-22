@@ -51,7 +51,9 @@ class OpportunityDetector:
         web3: Web3,
         min_profit_usd: float = 1.0,
         max_gas_price_gwei: int = 100,
-        check_interval: int = 5
+        check_interval: int = 5,
+        min_flash_loan: int = None,
+        max_flash_loan: int = None
     ):
         """
         Initialize the opportunity detector.
@@ -61,11 +63,17 @@ class OpportunityDetector:
             min_profit_usd: Minimum profit threshold in USD
             max_gas_price_gwei: Maximum acceptable gas price
             check_interval: Seconds between price checks
+            min_flash_loan: Minimum flash loan amount (in smallest unit, e.g., USDC has 6 decimals)
+            max_flash_loan: Maximum flash loan amount (in smallest unit)
         """
         self.web3 = web3
         self.min_profit_usd = min_profit_usd
         self.max_gas_price_gwei = max_gas_price_gwei
         self.check_interval = check_interval
+
+        # Flash loan optimization bounds
+        self.min_flash_loan = min_flash_loan or 500 * 10**6      # Default: $500
+        self.max_flash_loan = max_flash_loan or 100000 * 10**6   # Default: $100k
 
         # Contract addresses from environment
         self.v3_quoter = self.web3.to_checksum_address(
@@ -392,6 +400,119 @@ class OpportunityDetector:
 
         return net_profit_usd >= self.min_profit_usd
 
+    def find_optimal_flash_loan_amount(
+        self,
+        token_a: str,
+        token_b: str,
+        direction: str,
+        min_amount: int = 500 * 10**6,      # $500 minimum
+        max_amount: int = 100000 * 10**6,   # $100k maximum
+        token_decimals: int = 6
+    ) -> Optional[Dict]:
+        """
+        Find optimal flash loan amount using binary search with profit sampling.
+
+        Strategy:
+        1. Start with initial test to confirm opportunity exists
+        2. Use adaptive search to find inflection point where slippage reduces profit
+        3. Return amount with maximum net profit
+
+        Args:
+            token_a: First token address
+            token_b: Second token address
+            direction: 'V3→V2' or 'V2→V3'
+            min_amount: Minimum flash loan amount to test
+            max_amount: Maximum flash loan amount to test
+            token_decimals: Token decimals for logging
+
+        Returns:
+            Optimal opportunity dict or None if no profitable amount found
+        """
+        logger.info(f"🔍 Optimizing flash loan amount for {direction}...")
+
+        # Test initial small amount to confirm opportunity exists
+        initial_opps = self.calculate_arbitrage(token_a, token_b, min_amount)
+        if not initial_opps:
+            logger.debug(f"No opportunity at minimum amount ${min_amount / 10**token_decimals:,.0f}")
+            return None
+
+        # Filter for the specific direction
+        initial_opp = None
+        for opp in initial_opps:
+            if opp['direction'] == direction:
+                initial_opp = opp
+                break
+
+        if not initial_opp:
+            logger.debug(f"No {direction} opportunity found")
+            return None
+
+        # Check if profitable after gas at minimum amount
+        if not self.is_profitable_after_gas(initial_opp['net_profit'], token_a, token_decimals):
+            logger.debug(f"Not profitable after gas at minimum amount")
+            return None
+
+        # Adaptive search: test increasing amounts to find optimal
+        best_opp = initial_opp
+        best_profit = initial_opp['net_profit']
+
+        # Start with doubling strategy, then refine
+        test_amounts = []
+        current = min_amount
+        while current <= max_amount:
+            test_amounts.append(current)
+            current *= 2
+
+        # Add some intermediate points for precision
+        test_amounts.append(max_amount)
+        test_amounts = sorted(set(test_amounts))[:15]  # Limit to 15 tests for speed
+
+        logger.info(f"  Testing {len(test_amounts)} amounts from ${test_amounts[0]/10**token_decimals:,.0f} to ${test_amounts[-1]/10**token_decimals:,.0f}")
+
+        for amount in test_amounts[1:]:  # Skip first (already tested)
+            opps = self.calculate_arbitrage(token_a, token_b, amount)
+            if not opps:
+                # Hit liquidity limit, stop searching higher
+                logger.debug(f"  No liquidity at ${amount/10**token_decimals:,.0f}, stopping")
+                break
+
+            # Find matching direction
+            matching_opp = None
+            for opp in opps:
+                if opp['direction'] == direction:
+                    matching_opp = opp
+                    break
+
+            if not matching_opp:
+                # Direction no longer profitable
+                logger.debug(f"  {direction} not profitable at ${amount/10**token_decimals:,.0f}")
+                break
+
+            current_profit = matching_opp['net_profit']
+
+            # Check if still profitable after gas
+            if not self.is_profitable_after_gas(current_profit, token_a, token_decimals):
+                logger.debug(f"  Not profitable after gas at ${amount/10**token_decimals:,.0f}")
+                break
+
+            profit_usd = current_profit / 10**token_decimals
+            logger.info(f"  ${amount/10**token_decimals:,.0f} → ${profit_usd:.2f} profit")
+
+            if current_profit > best_profit:
+                best_profit = current_profit
+                best_opp = matching_opp
+            else:
+                # Profit decreasing due to slippage, we've passed the optimum
+                logger.info(f"  Slippage increasing, optimal amount found")
+                break
+
+        optimal_amount = best_opp['amount_in']
+        optimal_profit_usd = best_profit / 10**token_decimals
+
+        logger.info(f"✅ Optimal: ${optimal_amount/10**token_decimals:,.0f} flash loan → ${optimal_profit_usd:.2f} profit")
+
+        return best_opp
+
     def log_opportunity(self, opportunity: Dict, token_decimals: int = 6):
         """
         Log opportunity to database.
@@ -438,39 +559,53 @@ class OpportunityDetector:
 
     def scan_opportunities(self) -> List[Dict]:
         """
-        Scan all trading pairs for arbitrage opportunities.
+        Scan all trading pairs for arbitrage opportunities with optimized flash loan amounts.
 
         Returns:
-            List of profitable opportunities
+            List of profitable opportunities (optimized for maximum profit)
         """
         all_opportunities = []
 
-        # Test amounts (in smallest unit - e.g., USDC has 6 decimals)
-        test_amounts = [
-            1000 * 10**6,   # $1,000
-            5000 * 10**6,   # $5,000
-            10000 * 10**6,  # $10,000
-        ]
-
-        logger.info(f"🔍 Scanning {len(self.trading_pairs)} pairs with {len(test_amounts)} amounts...")
+        logger.info(f"🔍 Scanning {len(self.trading_pairs)} pairs with flash loan optimization...")
 
         for token_a, token_b in self.trading_pairs:
-            for amount in test_amounts:
-                try:
-                    opportunities = self.calculate_arbitrage(token_a, token_b, amount)
+            try:
+                # Quick test with minimum amount to check if any opportunity exists
+                quick_test = self.calculate_arbitrage(token_a, token_b, self.min_flash_loan)
 
-                    for opp in opportunities:
-                        # Check if profitable after gas
-                        if self.is_profitable_after_gas(
-                            opp['net_profit'],
-                            opp['token_in'],
-                            token_decimals=6
-                        ):
-                            all_opportunities.append(opp)
-                            self.log_opportunity(opp)
+                if not quick_test:
+                    logger.debug(f"No opportunity for {token_a[:6]}↔{token_b[:6]}")
+                    continue
 
-                except Exception as e:
-                    logger.error(f"Error scanning {token_a[:6]}↔{token_b[:6]}: {e}")
+                # Extract directions that are profitable
+                profitable_directions = []
+                for opp in quick_test:
+                    if self.is_profitable_after_gas(opp['net_profit'], opp['token_in'], token_decimals=6):
+                        profitable_directions.append(opp['direction'])
+
+                if not profitable_directions:
+                    logger.debug(f"No profitable direction after gas for {token_a[:6]}↔{token_b[:6]}")
+                    continue
+
+                # For each profitable direction, find optimal flash loan amount
+                for direction in profitable_directions:
+                    logger.info(f"💰 Found {direction} opportunity for {token_a[:6]}↔{token_b[:6]}, optimizing...")
+
+                    optimal_opp = self.find_optimal_flash_loan_amount(
+                        token_a,
+                        token_b,
+                        direction,
+                        min_amount=self.min_flash_loan,
+                        max_amount=self.max_flash_loan,
+                        token_decimals=6
+                    )
+
+                    if optimal_opp:
+                        all_opportunities.append(optimal_opp)
+                        self.log_opportunity(optimal_opp)
+
+            except Exception as e:
+                logger.error(f"Error scanning {token_a[:6]}↔{token_b[:6]}: {e}")
 
         return all_opportunities
 
