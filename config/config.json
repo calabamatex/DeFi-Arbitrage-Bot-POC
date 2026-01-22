@@ -1,0 +1,46 @@
+{
+  "mainnet": {
+    "POLYGON_RPC_URL": "https://polygon-rpc.com/",
+    "ETHEREUM_RPC_URL": "https://mainnet.infura.io/v3/YOUR_PROJECT_ID",
+    "UNISWAP_V3_ROUTER": "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+    "SUSHISWAP_ROUTER": "0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F",
+    "QUICKSWAP_ROUTER": "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff"
+  },
+  "testnet": {
+    "POLYGON_RPC_URL": "https://rpc-mumbai.maticvigil.com/",
+    "ETHEREUM_RPC_URL": "https://goerli.infura.io/v3/YOUR_PROJECT_ID",
+    "UNISWAP_V3_ROUTER": "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+    "SUSHISWAP_ROUTER": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
+    "QUICKSWAP_ROUTER": "0x8954AfA98594b838bda56FE4C12a09D7739D179b"
+  },
+  "tokens": [
+    {
+      "symbol": "WETH",
+      "mainnet": {"address": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619", "decimals": 18},
+      "testnet": {"address": "0xA6FA4fB5f76172d178d61B04b0ecd319C5d1C0aa", "decimals": 18}
+    },
+    {
+      "symbol": "USDC",
+      "mainnet": {"address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", "decimals": 6},
+      "testnet": {"address": "0xe11A86849d99F524cAC3E7A0Ec1241828e332C62", "decimals": 6}
+    },
+    {
+      "symbol": "USDT",
+      "mainnet": {"address": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F", "decimals": 6},
+      "testnet": {"address": "0xA02f6adc7926efeBBd59Fd43A84f4E0c0c91e832", "decimals": 6}
+    },
+    {
+      "symbol": "DAI",
+      "mainnet": {"address": "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063", "decimals": 18},
+      "testnet": {"address": "0x001B3B4d0F3714Ca98ba10F6042DaEbF0B1B7b6F", "decimals": 18}
+    }
+  ],
+  "settings": {
+    "BASE_PROFIT_THRESHOLD": "0.005",
+    "SLIPPAGE_TOLERANCE": "0.005",
+    "MAX_RETRIES": 3,
+    "GAS_LIMIT": 300000,
+    "MAX_POSITION_SIZE_USD": 10000,
+    "DAILY_LOSS_LIMIT_USD": 1000
+  }
+}

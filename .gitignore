@@ -1,3 +1,6 @@
+# Environment variables
+.env
+
 # Python
 __pycache__/
 *.py[cod]
@@ -20,25 +23,11 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
-.env
-.venv/
+
+# Virtual Environment
 venv/
-ENV/
 env/
-
-# Hardhat
-node_modules/
-cache/
-artifacts/
-typechain-types/
-coverage/
-coverage.json
-.hardhat/
-
-# Foundry
-out/
-broadcast/
-forge-cache/
+ENV/
 
 # IDE
 .vscode/
@@ -47,52 +36,39 @@ forge-cache/
 *.swo
 *~
 
-# Keys (NEVER COMMIT KEYS!)
-.keys/
-*.pem
-*.key
-private-key.txt
-mnemonic.txt
-.secret
-
 # Logs
-*.log
 logs/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+*.log
+bot_*.log
 
-# Database
+# Data and backups
+data/
+backups/
 *.db
 *.sqlite
-*.sqlite3
+
+# Test coverage
+.coverage
+.pytest_cache/
+htmlcov/
+.tox/
 
 # OS
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.hypothesis/
-
-# Deployment
-.env.production
-.env.local
-.env.*.local
-
-# Contract artifacts
-deployments/localhost/
-deployments/hardhat/
-
 # Temporary files
-tmp/
-temp/
 *.tmp
+*.temp
+.cache/
+
+# Reports
+report_*.md
+
+# Jupyter
+.ipynb_checkpoints
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
