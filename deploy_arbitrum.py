@@ -106,30 +106,35 @@ def deploy_contract(name, bytecode, abi, constructor_args=None):
     gas_estimate = constructor_txn.estimate_gas({'from': deployer})
     print(f"   Gas estimate: {gas_estimate:,}")
 
-    # Get current gas price
-    gas_price = web3.eth.gas_price
-    gas_price_gwei = web3.from_wei(gas_price, 'gwei')
-    print(f"   Gas price: {gas_price_gwei:.2f} gwei")
+    # Get current gas price (EIP-1559 for Arbitrum)
+    latest_block = web3.eth.get_block('latest')
+    base_fee = latest_block['baseFeePerGas']
+    max_priority_fee = web3.to_wei(0.01, 'gwei')  # Minimal priority fee for Arbitrum
+    max_fee = base_fee * 2 + max_priority_fee  # 2x base fee + priority
+
+    gas_price_gwei = web3.from_wei(max_fee, 'gwei')
+    print(f"   Max fee per gas: {gas_price_gwei:.4f} gwei")
 
     # Calculate cost
-    cost_wei = gas_estimate * gas_price
+    cost_wei = gas_estimate * max_fee
     cost_eth = web3.from_wei(cost_wei, 'ether')
     cost_usd = float(cost_eth) * 2500  # Rough ETH price
     print(f"   Estimated cost: {cost_eth:.6f} ETH (~${cost_usd:.2f})")
 
-    # Build transaction
+    # Build transaction (EIP-1559)
     nonce = web3.eth.get_transaction_count(deployer)
     txn = constructor_txn.build_transaction({
         'from': deployer,
         'nonce': nonce,
-        'gas': int(gas_estimate * 1.2),  # 20% buffer
-        'gasPrice': gas_price
+        'gas': int(gas_estimate * 1.5),  # 50% buffer for safety
+        'maxFeePerGas': max_fee,
+        'maxPriorityFeePerGas': max_priority_fee
     })
 
     # Sign and send
     signed_txn = web3.eth.account.sign_transaction(txn, PRIVATE_KEY)
     print(f"   Sending transaction...")
-    tx_hash = web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+    tx_hash = web3.eth.send_raw_transaction(signed_txn.raw_transaction)
     print(f"   TX Hash: {tx_hash.hex()}")
     print(f"   Waiting for confirmation...")
 
@@ -139,7 +144,8 @@ def deploy_contract(name, bytecode, abi, constructor_args=None):
     if receipt['status'] == 1:
         contract_address = receipt['contractAddress']
         gas_used = receipt['gasUsed']
-        actual_cost_eth = web3.from_wei(gas_used * gas_price, 'ether')
+        effective_gas_price = receipt['effectiveGasPrice']
+        actual_cost_eth = web3.from_wei(gas_used * effective_gas_price, 'ether')
         actual_cost_usd = float(actual_cost_eth) * 2500
 
         print(f"   ✅ Deployed at: {contract_address}")
@@ -157,10 +163,12 @@ print("DEPLOYING CONTRACTS")
 print("=" * 80)
 
 # 1. Deploy Uniswap V3 Adapter
+UNISWAP_V3_ROUTER = "0xE592427A0AEce92De3Edee1F18E0157C05861564"
 v3_adapter_address, v3_tx = deploy_contract(
     'UniswapV3AdapterFixed',
     uniswap_v3_bytecode,
-    uniswap_v3_abi
+    uniswap_v3_abi,
+    constructor_args=[UNISWAP_V3_ROUTER]
 )
 
 if not v3_adapter_address:
@@ -170,10 +178,12 @@ if not v3_adapter_address:
 time.sleep(5)  # Wait between deployments
 
 # 2. Deploy Uniswap V2 Adapter
+SUSHISWAP_ROUTER = "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506"
 v2_adapter_address, v2_tx = deploy_contract(
     'UniswapV2Adapter',
     uniswap_v2_bytecode,
-    uniswap_v2_abi
+    uniswap_v2_abi,
+    constructor_args=[SUSHISWAP_ROUTER, "SushiSwap"]
 )
 
 if not v2_adapter_address:
@@ -183,11 +193,14 @@ if not v2_adapter_address:
 time.sleep(5)
 
 # 3. Deploy FlashLoanArbitrageV2
+AAVE_POOL_PROVIDER = "0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb"
+MIN_PROFIT = 5 * 10**6  # $5 in USDC (6 decimals)
+MAX_SLIPPAGE_BPS = 100  # 1% max slippage
 flashloan_address, flashloan_tx = deploy_contract(
     'FlashLoanArbitrageV2',
     flashloan_bytecode,
     flashloan_abi,
-    constructor_args=[AAVE_POOL, deployer]
+    constructor_args=[AAVE_POOL_PROVIDER, MIN_PROFIT, MAX_SLIPPAGE_BPS]
 )
 
 if not flashloan_address:

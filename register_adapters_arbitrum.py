@@ -66,30 +66,33 @@ flashloan_contract = web3.eth.contract(
 )
 
 # Register adapters
-def register_adapter(adapter_address, adapter_type):
+def register_adapter(adapter_address, adapter_name):
     """Register an adapter with the main contract"""
-    type_name = "Uniswap V3" if adapter_type == 0 else "Uniswap V2"
-    print(f"\n📝 Registering {type_name} adapter...")
+    print(f"\n📝 Registering {adapter_name} adapter...")
     print(f"   Address: {adapter_address}")
 
-    # Build transaction
+    # Build transaction (EIP-1559 for Arbitrum)
     nonce = web3.eth.get_transaction_count(deployer)
-    gas_price = web3.eth.gas_price
+    latest_block = web3.eth.get_block('latest')
+    base_fee = latest_block['baseFeePerGas']
+    max_priority_fee = web3.to_wei(0.01, 'gwei')
+    max_fee = base_fee * 2 + max_priority_fee
 
-    txn = flashloan_contract.functions.registerAdapter(
+    txn = flashloan_contract.functions.setAdapter(
         Web3.to_checksum_address(adapter_address),
-        adapter_type
+        True  # Enable this adapter
     ).build_transaction({
         'from': deployer,
         'nonce': nonce,
         'gas': 150000,
-        'gasPrice': gas_price
+        'maxFeePerGas': max_fee,
+        'maxPriorityFeePerGas': max_priority_fee
     })
 
     # Sign and send
     signed_txn = web3.eth.account.sign_transaction(txn, PRIVATE_KEY)
     print(f"   Sending transaction...")
-    tx_hash = web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+    tx_hash = web3.eth.send_raw_transaction(signed_txn.raw_transaction)
     print(f"   TX Hash: {tx_hash.hex()}")
 
     # Wait for receipt
@@ -97,7 +100,8 @@ def register_adapter(adapter_address, adapter_type):
 
     if receipt['status'] == 1:
         gas_used = receipt['gasUsed']
-        cost_eth = web3.from_wei(gas_used * gas_price, 'ether')
+        effective_gas_price = receipt['effectiveGasPrice']
+        cost_eth = web3.from_wei(gas_used * effective_gas_price, 'ether')
         cost_usd = float(cost_eth) * 2500
         print(f"   ✅ Registered successfully!")
         print(f"   Gas used: {gas_used:,}")
@@ -108,10 +112,10 @@ def register_adapter(adapter_address, adapter_type):
         return False
 
 # Register V3 adapter
-success_v3 = register_adapter(v3_adapter_address, 0)  # Type 0 = V3
+success_v3 = register_adapter(v3_adapter_address, "Uniswap V3")
 
 # Register V2 adapter
-success_v2 = register_adapter(v2_adapter_address, 1)  # Type 1 = V2
+success_v2 = register_adapter(v2_adapter_address, "Uniswap V2 (SushiSwap)")
 
 # Summary
 print("\n" + "=" * 80)

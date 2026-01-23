@@ -5,7 +5,7 @@ from web3 import Web3
 
 # Arbitrum mainnet RPC (using public endpoint for now)
 ARBITRUM_RPC = "https://arb1.arbitrum.io/rpc"
-WALLET_ADDRESS = "0xE05D16622CC5E54919248C97AF12Bf6C921269AC"
+WALLET_ADDRESS = "0x0570D2Eb2501EB8cEdf4FF2D9CbFfDe2D69eA469"
 
 def check_balance():
     """Check ETH balance on Arbitrum"""
