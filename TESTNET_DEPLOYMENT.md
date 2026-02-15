@@ -63,7 +63,7 @@ echo "POLYGON_RPC_URL=https://rpc-amoy.polygon.technology" >> .env
 # Deploy FlashLoanArbitrageV2
 forge create src/FlashLoanArbitrageV2.sol:FlashLoanArbitrageV2 \
   --rpc-url https://rpc-amoy.polygon.technology \
-  --private-key 0xcf4cbdb74541d0dfe888271c7f9424c0fc7e62bcd0f50a72ae9363d112a55ff9 \
+  --private-key $PRIVATE_KEY \
   --constructor-args 0x4CeDCB57Af02293231BAA9D39354D6BFDFD251e0
 
 # Save the deployed address!
@@ -71,13 +71,13 @@ forge create src/FlashLoanArbitrageV2.sol:FlashLoanArbitrageV2 \
 # Deploy UniswapV3Adapter
 forge create src/UniswapV3Adapter.sol:UniswapV3Adapter \
   --rpc-url https://rpc-amoy.polygon.technology \
-  --private-key 0xcf4cbdb74541d0dfe888271c7f9424c0fc7e62bcd0f50a72ae9363d112a55ff9 \
+  --private-key $PRIVATE_KEY \
   --constructor-args 0x0227628f3F023bb0B980b67D528571c95c6DaC1c "UniswapV3"
 
 # Deploy UniswapV2Adapter (for QuickSwap, if available)
 forge create src/UniswapV2Adapter.sol:UniswapV2Adapter \
   --rpc-url https://rpc-amoy.polygon.technology \
-  --private-key 0xcf4cbdb74541d0dfe888271c7f9424c0fc7e62bcd0f50a72ae9363d112a55ff9 \
+  --private-key $PRIVATE_KEY \
   --constructor-args <QUICKSWAP_ROUTER_ADDRESS> "QuickSwap"
 ```
 
@@ -90,7 +90,7 @@ cast send <FLASH_LOAN_ADDRESS> \
   <V3_ADAPTER_ADDRESS> \
   true \
   --rpc-url https://rpc-amoy.polygon.technology \
-  --private-key 0xcf4cbdb74541d0dfe888271c7f9424c0fc7e62bcd0f50a72ae9363d112a55ff9
+  --private-key $PRIVATE_KEY
 
 # Register V2 Adapter
 cast send <FLASH_LOAN_ADDRESS> \
@@ -98,7 +98,7 @@ cast send <FLASH_LOAN_ADDRESS> \
   <V2_ADAPTER_ADDRESS> \
   true \
   --rpc-url https://rpc-amoy.polygon.technology \
-  --private-key 0xcf4cbdb74541d0dfe888271c7f9424c0fc7e62bcd0f50a72ae9363d112a55ff9
+  --private-key $PRIVATE_KEY
 ```
 
 ---
@@ -131,7 +131,7 @@ Unfortunately, most DEX test tokens aren't available on Amoy yet. You have optio
 # Deploy mock ERC20 tokens for testing
 forge create MockERC20 \
   --rpc-url https://rpc-amoy.polygon.technology \
-  --private-key 0xcf4cbdb74541d0dfe888271c7f9424c0fc7e62bcd0f50a72ae9363d112a55ff9 \
+  --private-key $PRIVATE_KEY \
   --constructor-args "Mock USDC" "USDC" 6
 
 # Mint yourself some tokens
@@ -140,7 +140,7 @@ cast send <USDC_ADDRESS> \
   0x21451Fc62F8Fce09E1a2Af8Abb0cED296Adb552E \
   1000000000000 \
   --rpc-url https://rpc-amoy.polygon.technology \
-  --private-key 0xcf4cbdb74541d0dfe888271c7f9424c0fc7e62bcd0f50a72ae9363d112a55ff9
+  --private-key $PRIVATE_KEY
 ```
 
 **Option B: Use Existing Testnet Pools**

@@ -1,0 +1,23 @@
+{
+  "chain_id": 137,
+  "pools": [
+    {
+      "name": "aave",
+      "address": "0x445FE580eF8d70FF569aB36e80c647af338db351",
+      "tokens": [
+        {"symbol": "DAI", "address": "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063", "index": 0},
+        {"symbol": "USDC", "address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", "index": 1},
+        {"symbol": "USDT", "address": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F", "index": 2}
+      ]
+    },
+    {
+      "name": "atricrypto3",
+      "address": "0x92215849c439E1f8612b6646060B4E3E5ef822cC",
+      "tokens": [
+        {"symbol": "DAI", "address": "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063", "index": 0},
+        {"symbol": "USDC", "address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", "index": 1},
+        {"symbol": "USDT", "address": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F", "index": 2}
+      ]
+    }
+  ]
+}

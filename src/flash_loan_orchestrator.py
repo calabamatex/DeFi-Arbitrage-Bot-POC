@@ -21,15 +21,11 @@ from src.db.models import (
     Opportunity, Transaction, TradeResult, ExecutionLog,
     OpportunityStatus, TransactionStatus
 )
+from src.flash_loan_providers import FlashLoanSelector, FlashLoanProvider
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 
@@ -48,24 +44,51 @@ class FlashLoanOrchestrator:
         private_key: str,
         v3_adapter_address: str,
         v2_adapter_address: str,
-        dry_run: bool = False
+        dry_run: bool = False,
+        slippage_tolerance_pct: float = None,
+        tx_deadline_seconds: int = None,
+        curve_adapter_address: str = None,
+        balancer_contract_address: str = None,
     ):
         """
         Initialize the orchestrator.
 
         Args:
             web3: Web3 instance
-            contract_address: FlashLoanArbitrageV2 address
+            contract_address: FlashLoanArbitrageV2 address (Aave)
             private_key: Private key for signing transactions
             v3_adapter_address: UniswapV3Adapter address
             v2_adapter_address: UniswapV2Adapter address
             dry_run: If True, simulate without sending transactions
+            slippage_tolerance_pct: Max slippage % for intermediate swaps (default: env or 1.0)
+            tx_deadline_seconds: Transaction deadline in seconds (default: env or 120)
+            curve_adapter_address: Optional CurveAdapter address
+            balancer_contract_address: Optional BalancerFlashLoan address (0% fee)
         """
         self.web3 = web3
         self.contract_address = web3.to_checksum_address(contract_address)
         self.v3_adapter = web3.to_checksum_address(v3_adapter_address)
         self.v2_adapter = web3.to_checksum_address(v2_adapter_address)
+        self.curve_adapter = (
+            web3.to_checksum_address(curve_adapter_address) if curve_adapter_address else None
+        )
+        self.balancer_contract_address = (
+            web3.to_checksum_address(balancer_contract_address) if balancer_contract_address else None
+        )
         self.dry_run = dry_run
+
+        # Flash loan provider selector (Aave vs Balancer)
+        self.flash_loan_selector = FlashLoanSelector(
+            web3=web3,
+            aave_contract_address=contract_address,
+            balancer_contract_address=balancer_contract_address,
+        )
+        self.slippage_tolerance_pct = slippage_tolerance_pct or float(
+            os.getenv('SLIPPAGE_TOLERANCE_PCT', '1.0')
+        )
+        self.tx_deadline_seconds = tx_deadline_seconds or int(
+            os.getenv('TX_DEADLINE_SECONDS', '120')
+        )
 
         # Initialize account
         self.account = Account.from_key(private_key)
@@ -75,6 +98,8 @@ class FlashLoanOrchestrator:
         logger.info(f"Contract: {self.contract_address}")
         logger.info(f"Executor: {self.address}")
         logger.info(f"Dry run: {dry_run}")
+        logger.info(f"Slippage tolerance: {self.slippage_tolerance_pct}%")
+        logger.info(f"TX deadline: {self.tx_deadline_seconds}s")
 
         # Initialize contract
         self._init_contract()
@@ -144,22 +169,40 @@ class FlashLoanOrchestrator:
         except Exception as e:
             logger.error(f"Failed to verify contract: {e}")
 
-    def encode_v3_swap_data(self, fee: int, deadline: int) -> bytes:
+    def encode_v3_swap_data(self, fee: int) -> bytes:
         """
-        Encode Uniswap V3 swap data.
+        Encode Uniswap V3 swap data (fee tier only).
+
+        The deadline is passed separately via the IDEXAdapter interface,
+        so data only contains the V3 pool fee tier.
 
         Args:
             fee: Fee tier (500, 3000, or 10000)
-            deadline: Transaction deadline
 
         Returns:
-            Encoded bytes
+            ABI-encoded uint24 fee
         """
-        # For V3, we encode: fee (uint24) + deadline (uint256)
-        return self.web3.codec.encode(
-            ['uint24', 'uint256'],
-            [fee, deadline]
-        )
+        return self.web3.codec.encode(['uint24'], [fee])
+
+    def _get_adapter_for_dex(self, dex_name: str) -> str:
+        """Map DEX name to adapter address."""
+        mapping = {
+            'uniswap_v3': self.v3_adapter,
+            'quickswap': self.v2_adapter,
+            'sushiswap': self.v2_adapter,
+        }
+        if self.curve_adapter:
+            mapping['curve'] = self.curve_adapter
+        adapter = mapping.get(dex_name)
+        if not adapter:
+            raise ValueError(f"No adapter for DEX: {dex_name}")
+        return adapter
+
+    def _encode_dex_data(self, dex_name: str, fee: Optional[int]) -> bytes:
+        """Encode adapter-specific data for a swap step."""
+        if dex_name == 'uniswap_v3' and fee is not None:
+            return self.encode_v3_swap_data(fee)
+        return b''
 
     def build_swap_steps(
         self,
@@ -169,6 +212,9 @@ class FlashLoanOrchestrator:
         """
         Build swap steps from opportunity data.
 
+        Supports both legacy 2-step format (direction: V3→V2 / V2→V3)
+        and new N-step format (direction: triangular, with token_path/dex_path/amounts/fees).
+
         Args:
             opportunity: Opportunity dict from detector
             deadline: Transaction deadline timestamp
@@ -176,55 +222,85 @@ class FlashLoanOrchestrator:
         Returns:
             List of swap step tuples
         """
-        steps = []
+        direction = opportunity['direction']
 
+        # ── N-step path (triangular and beyond) ────────────────
+        if direction == 'triangular' and 'token_path' in opportunity:
+            return self._build_nstep_swap_steps(opportunity)
+
+        # ── Legacy 2-step path ─────────────────────────────────
+        return self._build_legacy_swap_steps(opportunity)
+
+    def _build_nstep_swap_steps(self, opportunity: Dict) -> List[Tuple]:
+        """Build swap steps for N-step paths (triangular, etc.)."""
+        steps = []
+        token_path = opportunity['token_path']
+        dex_path = opportunity['dex_path']
+        amounts = opportunity['amounts']
+        fees = opportunity['fees']
+        slippage_factor = int(100 - self.slippage_tolerance_pct)
+
+        num_legs = len(dex_path)
+        for i in range(num_legs):
+            adapter = self._get_adapter_for_dex(dex_path[i])
+            token_in = token_path[i]
+            token_out = token_path[i + 1]
+            expected_out = amounts[i + 1]
+            data = self._encode_dex_data(dex_path[i], fees[i])
+
+            if i < num_legs - 1:
+                # Intermediate step: apply slippage tolerance
+                min_out = int(expected_out * slippage_factor // 100)
+            else:
+                # Final step: require at least amount_in + net_profit
+                min_out = opportunity['amount_in'] + opportunity['net_profit']
+
+            steps.append((adapter, token_in, token_out, min_out, data))
+
+        return steps
+
+    def _build_legacy_swap_steps(self, opportunity: Dict) -> List[Tuple]:
+        """Build swap steps for legacy V3→V2 / V2→V3 format."""
+        steps = []
         direction = opportunity['direction']
         token_in = opportunity['token_in']
         token_out = opportunity['token_out']
         amount_in = opportunity['amount_in']
 
+        slippage_factor = int(100 - self.slippage_tolerance_pct)
         if direction == 'V3→V2':
-            # Step 1: Uniswap V3 (token_in → token_out)
+            expected_intermediate = opportunity.get('amount_after_v3', 0)
+        else:
+            expected_intermediate = opportunity.get('amount_after_v2', 0)
+        if expected_intermediate > 0:
+            first_step_min = int(expected_intermediate * slippage_factor // 100)
+        else:
+            fallback_factor = max(int(100 - self.slippage_tolerance_pct * 2), 90)
+            first_step_min = int(amount_in * fallback_factor // 100)
+
+        if direction == 'V3→V2':
             v3_fee = opportunity['v3_fee']
-            v3_data = self.encode_v3_swap_data(v3_fee, deadline)
+            v3_data = self.encode_v3_swap_data(v3_fee)
 
             steps.append((
-                self.v3_adapter,              # adapter
-                token_in,                     # tokenIn
-                token_out,                    # tokenOut
-                0,                            # minAmountOut (will calculate)
-                v3_data                       # data
+                self.v3_adapter, token_in, token_out,
+                first_step_min, v3_data
             ))
-
-            # Step 2: QuickSwap (token_out → token_in)
             steps.append((
-                self.v2_adapter,              # adapter
-                token_out,                    # tokenIn
-                token_in,                     # tokenOut
-                opportunity['amount_in'] + opportunity['net_profit'],  # minAmountOut
-                b''                           # data (empty for V2)
+                self.v2_adapter, token_out, token_in,
+                opportunity['amount_in'] + opportunity['net_profit'], b''
             ))
 
         elif direction == 'V2→V3':
-            # Step 1: QuickSwap (token_in → token_out)
             steps.append((
-                self.v2_adapter,              # adapter
-                token_in,                     # tokenIn
-                token_out,                    # tokenOut
-                0,                            # minAmountOut
-                b''                           # data
+                self.v2_adapter, token_in, token_out,
+                first_step_min, b''
             ))
-
-            # Step 2: Uniswap V3 (token_out → token_in)
             v3_fee = opportunity['v3_fee']
-            v3_data = self.encode_v3_swap_data(v3_fee, deadline)
-
+            v3_data = self.encode_v3_swap_data(v3_fee)
             steps.append((
-                self.v3_adapter,              # adapter
-                token_out,                    # tokenIn
-                token_in,                     # tokenOut
-                opportunity['amount_in'] + opportunity['net_profit'],  # minAmountOut
-                v3_data                       # data
+                self.v3_adapter, token_out, token_in,
+                opportunity['amount_in'] + opportunity['net_profit'], v3_data
             ))
 
         return steps
@@ -263,11 +339,25 @@ class FlashLoanOrchestrator:
         Returns:
             Transaction dict ready to sign
         """
-        # Get deadline (5 minutes from now)
-        deadline = int(time.time()) + 300
+        # Get deadline (configurable, default 120s)
+        deadline = int(time.time()) + self.tx_deadline_seconds
 
         # Build swap steps
         steps = self.build_swap_steps(opportunity, deadline)
+
+        # Select flash loan provider (Balancer 0% fee preferred)
+        provider, provider_contract_addr, fee_bps = self.flash_loan_selector.select_provider(
+            token_address=opportunity['token_in'],
+            amount=opportunity['amount_in'],
+        )
+        opportunity['_flash_loan_provider'] = provider.value
+        opportunity['_flash_loan_fee_bps'] = fee_bps
+
+        # Use the selected contract (both share the same executeArbitrage ABI)
+        active_contract = self.web3.eth.contract(
+            address=provider_contract_addr,
+            abi=self.contract.abi,
+        )
 
         # Build arbitrage params
         params = (
@@ -278,15 +368,21 @@ class FlashLoanOrchestrator:
             deadline                         # deadline
         )
 
+        # Get EIP-1559 gas pricing
+        latest_block = self.web3.eth.get_block('latest')
+        base_fee = latest_block.get('baseFeePerGas', self.web3.eth.gas_price)
+        max_priority = self.web3.to_wei(2, 'gwei')
+        max_fee = gas_price or (base_fee * 2 + max_priority)
+
         # Build transaction
-        transaction = self.contract.functions.executeArbitrage(
+        transaction = active_contract.functions.executeArbitrage(
             params
         ).build_transaction({
             'from': self.address,
-            'nonce': self.web3.eth.get_transaction_count(self.address),
+            'nonce': self.web3.eth.get_transaction_count(self.address, 'pending'),
             'gas': 0,  # Will be estimated
-            'maxFeePerGas': gas_price or self.web3.eth.gas_price,
-            'maxPriorityFeePerGas': self.web3.to_wei(2, 'gwei'),
+            'maxFeePerGas': max_fee,
+            'maxPriorityFeePerGas': max_priority,
             'chainId': self.web3.eth.chain_id
         })
 
@@ -336,8 +432,24 @@ class FlashLoanOrchestrator:
             logger.info(f"  Gas limit: {transaction['gas']:,}")
             logger.info(f"  Gas price: {self.web3.from_wei(transaction['maxFeePerGas'], 'gwei'):.2f} gwei")
 
+            # Pre-execution simulation via eth_call
+            try:
+                self.web3.eth.call({
+                    'from': transaction['from'],
+                    'to': transaction['to'],
+                    'data': transaction['data'],
+                    'gas': transaction['gas'],
+                    'maxFeePerGas': transaction['maxFeePerGas'],
+                    'maxPriorityFeePerGas': transaction['maxPriorityFeePerGas'],
+                })
+                logger.info("  Simulation passed")
+            except Exception as sim_err:
+                logger.error(f"  Simulation FAILED: {sim_err}")
+                result['error'] = f"Simulation failed: {sim_err}"
+                return result
+
             if self.dry_run:
-                logger.info("  [DRY RUN] Transaction built successfully")
+                logger.info("  [DRY RUN] Transaction built and simulated successfully")
                 result['success'] = True
                 result['tx_hash'] = '0x' + '0' * 64
                 result['gas_used'] = transaction['gas']
@@ -349,7 +461,7 @@ class FlashLoanOrchestrator:
                 signed_txn = self.account.sign_transaction(transaction)
 
                 # Send transaction
-                logger.info("  📤 Sending transaction...")
+                logger.info("  Sending transaction...")
                 tx_hash = self.web3.eth.send_raw_transaction(signed_txn.raw_transaction)
                 logger.info(f"  ✅ Transaction sent: {tx_hash.hex()}")
 
@@ -368,11 +480,13 @@ class FlashLoanOrchestrator:
 
                     # Calculate actual profit after gas
                     gas_cost = receipt['gasUsed'] * receipt['effectiveGasPrice']
-                    gas_cost_tokens = gas_cost / 10**18 * 0.80  # Assume MATIC = $0.80
-                    actual_profit = (opportunity['net_profit'] / 10**6) - gas_cost_tokens
+                    native_price_usd = float(os.getenv('NATIVE_TOKEN_PRICE_USD', '0.80'))
+                    gas_cost_usd = gas_cost / 10**18 * native_price_usd
+                    token_decimals = opportunity.get('token_decimals', 6)
+                    actual_profit = (opportunity['net_profit'] / 10**token_decimals) - gas_cost_usd
 
                     logger.info(f"  💰 Gross profit: {opportunity['net_profit'] / 10**6:.6f} tokens")
-                    logger.info(f"  ⛽ Gas cost: ~${gas_cost_tokens:.4f}")
+                    logger.info(f"  ⛽ Gas cost: ~${gas_cost_usd:.4f}")
                     logger.info(f"  💵 Net profit: ~${actual_profit:.4f}")
 
                 else:
@@ -404,64 +518,87 @@ class FlashLoanOrchestrator:
         Log execution result to database.
 
         Args:
-            opportunity_id: Opportunity ID
+            opportunity_id: Opportunity string ID (opportunity_id column)
             result: Execution result
             execution_time: Time taken to execute
         """
         try:
             with get_db() as db:
-                # Update opportunity status
+                # Look up opportunity by string ID, get integer PK
                 opp = db.query(Opportunity).filter_by(
                     opportunity_id=opportunity_id
                 ).first()
 
-                if opp:
-                    if result['success']:
-                        opp.status = OpportunityStatus.EXECUTED
-                    else:
-                        opp.status = OpportunityStatus.FAILED
+                if not opp:
+                    logger.warning(f"Opportunity {opportunity_id} not found in DB")
+                    return
 
-                    # Create transaction record
-                    if result['tx_hash']:
-                        transaction = Transaction(
-                            tx_hash=result['tx_hash'],
-                            opportunity_id=opportunity_id,
-                            chain_id=137,
-                            status=TransactionStatus.SUCCESS if result['success'] else TransactionStatus.FAILED,
-                            gas_used=result['gas_used'],
-                            gas_price=result['gas_price']
-                        )
-                        db.add(transaction)
+                # Update opportunity status
+                if result['success']:
+                    opp.status = OpportunityStatus.EXECUTED
+                    opp.executed_at = datetime.utcnow()
+                    opp.transaction_hash = result.get('tx_hash')
+                else:
+                    opp.status = OpportunityStatus.FAILED
 
-                        # Create trade result if successful
-                        if result['success']:
-                            trade_result = TradeResult(
-                                tx_hash=result['tx_hash'],
-                                opportunity_id=opportunity_id,
-                                chain_id=137,
-                                token_in=opp.token_in,
-                                token_out=opp.token_out,
-                                amount_in=opp.amount_in,
-                                amount_out=opp.amount_in + result['profit'],
-                                profit=result['profit'],
-                                gas_cost_wei=result['gas_used'] * result['gas_price']
-                            )
-                            db.add(trade_result)
+                chain_id = self.web3.eth.chain_id
+                gas_price_gwei = Decimal(str(result.get('gas_price', 0))) / Decimal(10**9) if result.get('gas_price') else Decimal(0)
 
-                    # Log execution
-                    exec_log = ExecutionLog(
-                        opportunity_id=opportunity_id,
-                        chain_id=137,
-                        status='success' if result['success'] else 'failed',
+                # Create transaction record using integer FK
+                tx_record = None
+                if result.get('tx_hash'):
+                    tx_record = Transaction(
                         tx_hash=result['tx_hash'],
-                        gas_used=result['gas_used'],
-                        execution_time_ms=int(execution_time * 1000),
-                        error_message=result.get('error')
+                        opportunity_id=opp.id,  # Integer FK
+                        chain_id=chain_id,
+                        from_address=self.address,
+                        to_address=self.contract_address,
+                        status=TransactionStatus.CONFIRMED if result['success'] else TransactionStatus.FAILED,
+                        gas_limit=result.get('gas_used', 600000),
+                        gas_used=result.get('gas_used'),
+                        gas_price_gwei=gas_price_gwei,
+                        nonce=result.get('nonce', 0),
                     )
-                    db.add(exec_log)
+                    db.add(tx_record)
+                    db.flush()  # Get tx_record.id
 
-                    db.commit()
-                    logger.info(f"  📝 Logged to database: {opportunity_id[:10]}...")
+                    # Create trade result if successful
+                    if result['success']:
+                        gas_cost_wei = (result.get('gas_used', 0) or 0) * (result.get('gas_price', 0) or 0)
+                        # Flash loan fee: 0.05% (5 bps)
+                        flash_loan_fee = (opp.amount_in * 5) // 10000
+                        # result['profit'] is already net of flash loan fee (from detector)
+                        # so gross = net + fee, and net_profit_amount = result['profit']
+                        trade_result = TradeResult(
+                            opportunity_id=opp.id,  # Integer FK
+                            transaction_id=tx_record.id,  # Integer FK
+                            success=True,
+                            profit_token=opp.token_in,
+                            profit_amount=result.get('profit', 0) + flash_loan_fee,
+                            gas_cost_wei=gas_cost_wei,
+                            flash_loan_fee=flash_loan_fee,
+                            net_profit_amount=result.get('profit', 0),
+                            execution_time_ms=int(execution_time * 1000),
+                        )
+                        db.add(trade_result)
+
+                # Log execution step
+                exec_log = ExecutionLog(
+                    opportunity_id=opp.id,  # Integer FK
+                    level='INFO' if result['success'] else 'ERROR',
+                    message=f"Execution {'succeeded' if result['success'] else 'failed'}: {result.get('error', 'OK')}",
+                    step='execution',
+                    data={
+                        'tx_hash': result.get('tx_hash'),
+                        'gas_used': result.get('gas_used'),
+                        'execution_time_ms': int(execution_time * 1000),
+                        'error': result.get('error'),
+                    }
+                )
+                db.add(exec_log)
+
+                db.commit()
+                logger.info(f"Logged to database: {opportunity_id[:10]}...")
 
         except Exception as e:
             logger.error(f"Failed to log execution to database: {e}")
@@ -527,8 +664,8 @@ class FlashLoanOrchestrator:
                                 'v3_fee': opp.extra_data.get('v3_fee', 3000) if opp.extra_data else 3000
                             }
 
-                            # Mark as processing
-                            opp.status = OpportunityStatus.PROCESSING
+                            # Mark as executing
+                            opp.status = OpportunityStatus.EXECUTING
                             db.commit()
 
                             # Execute
@@ -546,27 +683,32 @@ class FlashLoanOrchestrator:
 
 
 if __name__ == "__main__":
+    from src.utils.key_manager import load_private_key
+
     # Load configuration
     rpc_url = os.getenv("POLYGON_RPC_URL", "http://localhost:8545")
     contract_address = os.getenv("FLASH_LOAN_ARBITRAGE_ADDRESS")
-    private_key = os.getenv("PRIVATE_KEY")
     v3_adapter = os.getenv("UNISWAP_V3_ADAPTER_ADDRESS")
     v2_adapter = os.getenv("UNISWAP_V2_ADAPTER_ADDRESS")
     dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
 
-    if not all([contract_address, private_key, v3_adapter, v2_adapter]):
-        logger.error("❌ Missing required environment variables")
-        logger.error("Required: FLASH_LOAN_ARBITRAGE_ADDRESS, PRIVATE_KEY, UNISWAP_V3_ADAPTER_ADDRESS, UNISWAP_V2_ADAPTER_ADDRESS")
+    if not all([contract_address, v3_adapter, v2_adapter]):
+        logger.error("Missing required environment variables")
+        logger.error("Required: FLASH_LOAN_ARBITRAGE_ADDRESS, UNISWAP_V3_ADAPTER_ADDRESS, UNISWAP_V2_ADAPTER_ADDRESS")
+        logger.error("Key: Set KEYSTORE_FILE or PRIVATE_KEY env var")
         exit(1)
+
+    # Load private key securely (keystore or env var)
+    private_key = load_private_key()
 
     # Initialize Web3
     web3 = Web3(Web3.HTTPProvider(rpc_url))
 
     if not web3.is_connected():
-        logger.error("❌ Failed to connect to blockchain")
+        logger.error("Failed to connect to blockchain")
         exit(1)
 
-    logger.info(f"✅ Connected to blockchain (Chain ID: {web3.eth.chain_id})")
+    logger.info(f"Connected to blockchain (Chain ID: {web3.eth.chain_id})")
 
     # Initialize orchestrator
     orchestrator = FlashLoanOrchestrator(

@@ -1,5 +1,20 @@
-# Environment variables
+# Environment variables - NEVER commit secrets
 .env
+.env.*
+.env.local
+.env.production
+
+# Wallet and keystore files - NEVER commit private keys
+new_wallet_BACKUP.txt
+*wallet*.txt
+*private_key*
+*BACKUP*.txt
+keystore.json
+*.keystore
+keystores/
+
+# Emergency shutdown logs
+emergency_shutdown.log
 
 # Python
 __pycache__/
@@ -62,6 +77,10 @@ Thumbs.db
 *.temp
 .cache/
 
+# Runtime state files
+risk_state.json
+metrics_*.json
+
 # Reports
 report_*.md
 
@@ -72,3 +91,12 @@ report_*.md
 .mypy_cache/
 .dmypy.json
 dmypy.json
+node_modules
+
+# Foundry build artifacts
+out/
+broadcast/
+cache/
+
+# Next.js build artifacts
+.next/

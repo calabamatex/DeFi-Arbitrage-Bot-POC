@@ -1,0 +1,9 @@
+title = "Gitleaks config"
+
+[allowlist]
+  paths = [
+    '''.env\.example''',
+    '''tests/''',
+    '''test/''',
+    '''\.slither\.config\.json''',
+  ]

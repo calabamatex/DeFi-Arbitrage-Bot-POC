@@ -9,8 +9,9 @@ import time
 
 load_dotenv('.env.arbitrum')
 
+from src.utils.key_manager import load_private_key
 RPC_URL = os.getenv('ARBITRUM_RPC_URL')
-PRIVATE_KEY = os.getenv('PRIVATE_KEY')
+PRIVATE_KEY = load_private_key()
 
 web3 = Web3(Web3.HTTPProvider(RPC_URL))
 account = Account.from_key(PRIVATE_KEY)

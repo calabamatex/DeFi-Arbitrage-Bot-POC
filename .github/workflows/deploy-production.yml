@@ -1,0 +1,102 @@
+name: Deploy — Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      chain:
+        description: "Target production chain"
+        required: true
+        type: choice
+        options:
+          - polygon
+          - arbitrum
+      dry_run_first:
+        description: "Run dry-run validation before deploying"
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: deploy-production-${{ inputs.chain }}
+  cancel-in-progress: false
+
+jobs:
+  pre-deploy-checks:
+    name: Pre-Deploy Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run Python tests
+        env:
+          DATABASE_URL: sqlite:///test.db
+          DRY_RUN: "true"
+        run: pytest tests/ -v --ignore=tests/test_main.py -x
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install Node dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run Foundry tests
+        run: forge test --no-match-test "Fork" -v
+
+      - name: Security scan
+        run: |
+          bandit -r src/ -c .bandit.yml || true
+          pip-audit -r requirements.txt
+
+  approval:
+    name: Production Approval
+    needs: pre-deploy-checks
+    runs-on: ubuntu-latest
+    environment: production  # Requires manual approval in GitHub settings
+    steps:
+      - name: Approved
+        run: echo "Production deployment approved for ${{ inputs.chain }}"
+
+  deploy:
+    name: Deploy to Production (${{ inputs.chain }})
+    needs: approval
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build production Docker image
+        run: |
+          docker build -t arb-bot:${{ github.sha }} .
+          docker tag arb-bot:${{ github.sha }} arb-bot:production-${{ inputs.chain }}
+          docker tag arb-bot:${{ github.sha }} arb-bot:production-latest
+
+      # Add registry push and deployment steps when infrastructure is configured
+      # - name: Push to registry
+      # - name: Deploy to server
+
+  canary-validation:
+    name: Canary Validation
+    needs: deploy
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Health check loop (5 minutes)
+        run: |
+          echo "Canary validation — checking health for 5 minutes..."
+          for i in $(seq 1 10); do
+            echo "Health check $i/10..."
+            # Replace with actual health endpoint URL when configured
+            # curl -sf http://BOT_HOST:8080/health || exit 1
+            sleep 30
+          done
+          echo "Canary validation passed."

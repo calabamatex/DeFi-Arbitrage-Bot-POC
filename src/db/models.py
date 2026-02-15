@@ -302,6 +302,50 @@ class Token(Base):
     )
 
 
+class LiquidationOpportunity(Base):
+    """Aave liquidation opportunities detected and executed"""
+    __tablename__ = "liquidation_opportunities"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # Chain and timing
+    chain_id = Column(Integer, nullable=False, index=True)
+    detected_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    executed_at = Column(DateTime, nullable=True)
+
+    # Borrower
+    user_address = Column(String(42), nullable=False, index=True)
+    health_factor = Column(Numeric(78, 0), nullable=False)
+
+    # Assets
+    debt_asset = Column(String(42), nullable=False)
+    collateral_asset = Column(String(42), nullable=False)
+    debt_amount = Column(Numeric(78, 0), nullable=False)
+
+    # Profitability
+    liquidation_bonus_bps = Column(Integer, nullable=False)
+    gross_profit = Column(Numeric(78, 0), nullable=True)
+    flash_loan_fee = Column(Numeric(78, 0), nullable=True)
+    swap_cost = Column(Numeric(78, 0), nullable=True)
+    net_profit = Column(Numeric(78, 0), nullable=True)
+    net_profit_usd = Column(Numeric(20, 6), nullable=True)
+
+    # Execution
+    status = Column(String(20), nullable=False, default="detected", index=True)
+    transaction_hash = Column(String(66), nullable=True, index=True)
+    gas_used = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    # Timestamps
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_liquidations_status", "status"),
+        Index("idx_liquidations_user", "user_address"),
+    )
+
+
 class ExecutionLog(Base):
     """Detailed execution logs"""
     __tablename__ = "execution_log"
@@ -332,6 +376,7 @@ __all__ = [
     "Chain",
     "DEX",
     "Token",
+    "LiquidationOpportunity",
     "ExecutionLog",
     "OpportunityStatus",
     "TransactionStatus",

@@ -1,0 +1,38 @@
+groups:
+  - name: bot_alerts
+    rules:
+      - alert: BotDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Bot is down"
+          description: "{{ $labels.job }} has been unreachable for 2+ minutes."
+
+      - alert: CircuitBreakerActive
+        expr: bot_circuit_breaker_active == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Circuit breaker activated"
+          description: "{{ $labels.job }} circuit breaker has been active for 1+ minute."
+
+      - alert: NegativeDailyPnL
+        expr: bot_net_profit_usd < -500
+        for: 5m
+        labels:
+          severity: high
+        annotations:
+          summary: "Negative daily P&L exceeds $500"
+          description: "{{ $labels.job }} cumulative P&L is {{ $value }}."
+
+      - alert: HighMemoryUsage
+        expr: bot_memory_usage_mb > 500
+        for: 10m
+        labels:
+          severity: medium
+        annotations:
+          summary: "High memory usage"
+          description: "{{ $labels.job }} is using {{ $value }}MB of memory."

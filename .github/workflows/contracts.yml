@@ -1,0 +1,85 @@
+name: CI — Smart Contracts
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "contracts/**"
+      - "test/**/*.sol"
+      - "foundry.toml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "contracts/**"
+      - "test/**/*.sol"
+      - "foundry.toml"
+
+concurrency:
+  group: contracts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  foundry-tests:
+    name: Foundry Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install Node dependencies (for remappings)
+        run: npm ci --ignore-scripts
+
+      - name: Build contracts
+        run: forge build --sizes
+
+      - name: Run unit tests
+        run: forge test -vvv --no-match-test "Fork" --gas-report
+
+      - name: Run fuzz tests (CI profile)
+        run: FOUNDRY_PROFILE=ci forge test --no-match-test "Fork" -vv
+
+  fork-tests:
+    name: Fork Tests
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install Node dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run fork tests (Polygon)
+        env:
+          POLYGON_RPC_URL: ${{ secrets.POLYGON_RPC_URL }}
+        run: forge test --match-test "Fork" -vvv
+        if: env.POLYGON_RPC_URL != ''
+
+  slither:
+    name: Slither Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run Slither
+        uses: crytic/slither-action@v0.4.0
+        id: slither
+        with:
+          solc-version: "0.8.20"
+          slither-config: .slither.config.json
+          fail-on: none
+        continue-on-error: true

@@ -1,0 +1,49 @@
+{
+  "chain_id": 421614,
+  "chain_name": "arbitrum_sepolia",
+  "note": "Testnet tokens — addresses from Aave V3 faucet on Arbitrum Sepolia. Liquidity is minimal.",
+  "tokens": [
+    {
+      "symbol": "USDC",
+      "address": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+      "decimals": 6,
+      "is_stablecoin": true
+    },
+    {
+      "symbol": "USDT",
+      "address": "0x0EdAC3361e4b015346d2469D8B5B07b42b156B0E",
+      "decimals": 6,
+      "is_stablecoin": true
+    },
+    {
+      "symbol": "DAI",
+      "address": "0xD77b79BE3e85351fF0cbe78f1B58cf8d1064047C",
+      "decimals": 18,
+      "is_stablecoin": true
+    },
+    {
+      "symbol": "WETH",
+      "address": "0x980B62Da83eFf3D4576C647993b0c1D7faf17c73",
+      "decimals": 18,
+      "is_stablecoin": false
+    },
+    {
+      "symbol": "WBTC",
+      "address": "0xFb8c72738a1B719c05F2E2feA53220a28FAFe8f0",
+      "decimals": 8,
+      "is_stablecoin": false
+    },
+    {
+      "symbol": "LINK",
+      "address": "0xd6D39F34C85D6ea03f2E5E4F24a93EF3a1704d6A",
+      "decimals": 18,
+      "is_stablecoin": false
+    },
+    {
+      "symbol": "AAVE",
+      "address": "0x1b40E95cF4e36688d3D1aD3d0E07fbdB16E59467",
+      "decimals": 18,
+      "is_stablecoin": false
+    }
+  ]
+}

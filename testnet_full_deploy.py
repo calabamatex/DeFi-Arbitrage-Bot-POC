@@ -20,8 +20,9 @@ from dotenv import load_dotenv
 load_dotenv('.env.testnet')
 
 # Configuration
+from src.utils.key_manager import load_private_key
 TESTNET_RPC = "https://rpc-amoy.polygon.technology"
-PRIVATE_KEY = os.getenv('PRIVATE_KEY')
+PRIVATE_KEY = load_private_key()
 FOUNDRY_PATH = os.path.expanduser("~/.foundry/bin")
 
 # Initialize

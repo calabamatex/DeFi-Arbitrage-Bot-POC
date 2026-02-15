@@ -125,42 +125,26 @@ def load_config() -> Tuple[Dict[str, Any], str, Dict[str, Any], Dict[str, Dict]]
 
 def load_env_vars() -> Tuple[str, str, str]:
     """
-    Load sensitive data from environment variables.
+    Load sensitive data securely.
+
+    Private key is loaded via key_manager (encrypted keystore or runtime
+    env var). NEVER store keys in .env files.
 
     Returns:
         Tuple of (private_key, telegram_token, telegram_chat)
 
     Raises:
-        ConfigurationError: If PRIVATE_KEY missing or invalid
+        ConfigurationError: If no key source available or key is invalid
     """
-    private_key = os.getenv("PRIVATE_KEY")
-
-    if not private_key:
-        raise ConfigurationError(
-            "PRIVATE_KEY not found in environment variables. "
-            "Please set it in your .env file"
-        )
-
-    # Validate private key format
-    private_key = private_key.strip()
-
-    # Remove 0x prefix if present for validation
-    key_to_validate = private_key[2:] if private_key.startswith("0x") else private_key
-
-    # Check if it's a valid hex string of correct length
-    if len(key_to_validate) != 64:
-        raise ConfigurationError(
-            f"PRIVATE_KEY must be 64 hex characters (got {len(key_to_validate)})"
-        )
+    from src.utils.key_manager import load_private_key
 
     try:
-        int(key_to_validate, 16)
-    except ValueError:
-        raise ConfigurationError("PRIVATE_KEY must be a valid hex string")
-
-    # Ensure 0x prefix for Web3
-    if not private_key.startswith("0x"):
-        private_key = "0x" + private_key
+        private_key = load_private_key()
+    except SystemExit:
+        raise ConfigurationError(
+            "No private key configured. Set KEYSTORE_FILE (recommended) "
+            "or PRIVATE_KEY env var. Run: python -m src.utils.key_manager create"
+        )
 
     # Telegram credentials are optional
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN", "")

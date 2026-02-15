@@ -6,7 +6,7 @@ set -e
 export PATH="$HOME/.foundry/bin:$PATH"
 
 RPC="https://rpc-amoy.polygon.technology"
-KEY="0xcf4cbdb74541d0dfe888271c7f9424c0fc7e62bcd0f50a72ae9363d112a55ff9"
+KEY="${PRIVATE_KEY:?Error: PRIVATE_KEY environment variable must be set}"
 
 echo "🚀 Deploying to Polygon Amoy Testnet"
 echo ""

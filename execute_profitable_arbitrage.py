@@ -13,6 +13,7 @@ Arbitrage Path:
 5. Capture profit (~$884)
 """
 
+import os
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from eth_account import Account
@@ -21,8 +22,9 @@ from eth_account import Account
 web3 = Web3(Web3.HTTPProvider('http://localhost:8545'))
 web3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
-# Configuration
-PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+# Configuration — load key securely (keystore or env var, NEVER from .env file)
+from src.utils.key_manager import load_private_key
+PRIVATE_KEY = load_private_key()
 account = Account.from_key(PRIVATE_KEY)
 
 # Contract addresses

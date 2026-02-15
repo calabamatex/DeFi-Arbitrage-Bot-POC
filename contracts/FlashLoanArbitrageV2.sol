@@ -9,20 +9,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
-/**
- * @title IDEXAdapter
- * @notice Interface for DEX adapters
- */
-interface IDEXAdapter {
-    function swapDirect(
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn,
-        uint256 minAmountOut,
-        uint256 deadline,
-        address recipient
-    ) external returns (uint256 amountOut);
-}
+import {IDEXAdapter} from "./interfaces/IDEXAdapter.sol";
 
 /**
  * @title FlashLoanArbitrageV2
@@ -198,10 +185,13 @@ contract FlashLoanArbitrageV2 is Ownable, ReentrancyGuard, Pausable {
         for (uint256 i = 0; i < arbParams.steps.length; i++) {
             SwapStep memory step = arbParams.steps[i];
 
+            // Record balance before swap for verification
+            uint256 balanceBefore = IERC20(step.tokenOut).balanceOf(address(this));
+
             // Transfer tokens to adapter
             IERC20(step.tokenIn).safeTransfer(step.adapter, currentAmount);
 
-            // Execute swap
+            // Execute swap (pass step.data for adapter-specific params like V3 fee tier)
             try
                 IDEXAdapter(step.adapter).swapDirect(
                     step.tokenIn,
@@ -209,10 +199,16 @@ contract FlashLoanArbitrageV2 is Ownable, ReentrancyGuard, Pausable {
                     currentAmount,
                     step.minAmountOut,
                     arbParams.deadline,
-                    address(this)
+                    address(this),
+                    step.data
                 )
             returns (uint256 amountOut) {
-                currentAmount = amountOut;
+                // Verify actual balance change matches reported amountOut (C-04)
+                uint256 balanceAfter = IERC20(step.tokenOut).balanceOf(address(this));
+                uint256 actualReceived = balanceAfter - balanceBefore;
+                require(actualReceived >= step.minAmountOut, "Balance verification failed");
+
+                currentAmount = actualReceived; // Use actual received, not adapter's claim
                 currentToken = step.tokenOut;
             } catch {
                 revert SwapFailed(i);

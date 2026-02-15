@@ -17,8 +17,9 @@ load_dotenv()
 web3 = Web3(Web3.HTTPProvider(os.getenv('ALCHEMY_POLYGON_RPC_URL')))
 web3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
-# Load account
-account = Account.from_key(os.getenv('PRIVATE_KEY'))
+# Load account securely (keystore or env var)
+from src.utils.key_manager import load_private_key
+account = Account.from_key(load_private_key())
 
 print("="*80)
 print("🚀 DEPLOYING TO POLYGON MAINNET")

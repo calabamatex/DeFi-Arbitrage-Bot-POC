@@ -41,6 +41,130 @@ services:
     networks:
       - arbitrage_network
 
+  # Arbitrage Bot
+  arb-bot:
+    build: .
+    container_name: arbitrage_bot
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/arbitrage_bot
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - arbitrage_network
+
+  # Liquidation Bot
+  liquidation-bot:
+    build: .
+    container_name: liquidation_bot
+    command: ["python", "run_liquidation_bot.py"]
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/arbitrage_bot
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "8082:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - arbitrage_network
+    profiles:
+      - liquidation
+
+  # Dashboard API (FastAPI)
+  dashboard-api:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: dashboard_api
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/arbitrage_bot
+      BOT_API_URL: http://arb-bot:8080
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      arb-bot:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - arbitrage_network
+    profiles:
+      - dashboard
+
+  # Dashboard Web (Next.js)
+  dashboard-web:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: dashboard_web
+    command: ["node", "dashboard/web/server.js"]
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - dashboard-api
+    restart: unless-stopped
+    networks:
+      - arbitrage_network
+    profiles:
+      - dashboard
+
+  # Prometheus (monitoring)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: arbitrage_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./config/alert_rules.yml:/etc/prometheus/alert_rules.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'
+    restart: unless-stopped
+    networks:
+      - arbitrage_network
+    profiles:
+      - monitoring
+
+  # ARIA AI Agent (PM/PO)
+  pm-agent:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    container_name: aria_agent
+    env_file: [.env]
+    environment:
+      BOT_API_URL: http://arb-bot:8080
+      DASHBOARD_API_URL: http://dashboard-api:8000
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/arbitrage_bot
+    depends_on:
+      arb-bot:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - arbitrage_network
+    profiles:
+      - agent
+
   # Optional: PgAdmin for database management
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -83,6 +207,8 @@ volumes:
   redis_data:
     driver: local
   pgadmin_data:
+    driver: local
+  prometheus_data:
     driver: local
 
 networks:

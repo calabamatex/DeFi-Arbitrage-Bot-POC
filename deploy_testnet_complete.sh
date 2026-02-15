@@ -8,7 +8,7 @@ export PATH="$HOME/.foundry/bin:$PATH"
 
 # Configuration
 RPC_URL="https://rpc-amoy.polygon.technology"
-PRIVATE_KEY="0xcf4cbdb74541d0dfe888271c7f9424c0fc7e62bcd0f50a72ae9363d112a55ff9"
+PRIVATE_KEY="${PRIVATE_KEY:?Error: PRIVATE_KEY environment variable must be set}"
 AAVE_POOL_PROVIDER="0x4CeDCB57Af02293231BAA9D39354D6BFDFD251e0"
 UNISWAP_V3_FACTORY="0x0227628f3F023bb0B980b67D528571c95c6DaC1c"
 

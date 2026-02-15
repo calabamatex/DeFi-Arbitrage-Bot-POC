@@ -11,8 +11,9 @@ from dotenv import load_dotenv
 load_dotenv('.env.arbitrum')
 
 # Connect to Arbitrum
+from src.utils.key_manager import load_private_key
 ARBITRUM_RPC = os.getenv('ARBITRUM_RPC_URL')
-PRIVATE_KEY = os.getenv('PRIVATE_KEY')
+PRIVATE_KEY = load_private_key()
 AAVE_POOL = os.getenv('AAVE_POOL')
 
 print("=" * 80)

@@ -26,8 +26,8 @@ grep PRIVATE_KEY .env
 
 **Solution**:
 ```bash
-# For testnet (Mumbai)
-ENVIRONMENT=testnet  # Chain ID should be 80001
+# For testnet (Polygon Amoy / Arbitrum Sepolia)
+EXECUTION_MODE=testnet  # Chain IDs: 80002 (Amoy), 421614 (Arb Sepolia)
 
 # For mainnet (Polygon)
 ENVIRONMENT=mainnet  # Chain ID should be 137

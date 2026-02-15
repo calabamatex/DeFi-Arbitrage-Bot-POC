@@ -45,7 +45,7 @@ class EmergencyShutdown:
     3. External signals (abnormal market conditions)
     """
 
-    def __init__(self, telegram_bot=None, admin_code: str = "EMERGENCY_SHUTDOWN_2024"):
+    def __init__(self, telegram_bot=None, admin_code: str = None):
         """
         Initialize emergency shutdown system.
 
@@ -53,8 +53,10 @@ class EmergencyShutdown:
             telegram_bot: TelegramBot instance for notifications
             admin_code: Code required to reset shutdown
         """
+        import os
+
         self.telegram_bot = telegram_bot
-        self.admin_code = admin_code
+        self.admin_code = admin_code or os.environ.get("ADMIN_RESET_CODE", "")
 
         self.shutdown_active = False
         self.shutdown_reason: Optional[str] = None
@@ -290,7 +292,13 @@ class EmergencyShutdown:
         Returns:
             True if reset successful
         """
-        if admin_code != self.admin_code:
+        import hmac
+
+        if not self.admin_code:
+            logger.error("No admin code configured -- cannot reset shutdown")
+            return False
+
+        if not hmac.compare_digest(admin_code, self.admin_code):
             logger.warning("Invalid admin code for shutdown reset")
             return False
 

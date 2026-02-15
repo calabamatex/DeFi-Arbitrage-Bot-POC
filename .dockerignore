@@ -1,0 +1,47 @@
+# Version control
+.git
+.gitignore
+
+# Python artifacts
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.pytest_cache
+.mypy_cache
+htmlcov
+.coverage
+
+# Node / Foundry build artifacts
+node_modules
+out
+cache
+lib
+
+# IDE
+.vscode
+.idea
+
+# Logs and temp files
+*.log
+*.tmp
+bot.log
+liquidation_bot.log
+
+# Environment files with secrets
+.env
+*.keystore
+
+# Test files (not needed in production image)
+tests/
+test/
+scripts/
+docs/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Dashboard (separate build)
+dashboard/

@@ -204,7 +204,8 @@ def test_load_config_invalid_token_address(valid_config, monkeypatch):
 
 def test_load_env_vars_success(monkeypatch):
     """Test successful loading of environment variables."""
-    # Setup
+    # Setup — ensure no keystore takes priority
+    monkeypatch.delenv("KEYSTORE_FILE", raising=False)
     monkeypatch.setenv("PRIVATE_KEY", "0x" + "a" * 64)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test_token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
@@ -219,38 +220,42 @@ def test_load_env_vars_success(monkeypatch):
 
 
 def test_load_env_vars_missing_private_key(monkeypatch):
-    """Test that missing PRIVATE_KEY raises ConfigurationError."""
-    # Setup
+    """Test that missing key source raises ConfigurationError."""
+    # Setup — no keystore, no env var
+    monkeypatch.delenv("KEYSTORE_FILE", raising=False)
     monkeypatch.delenv("PRIVATE_KEY", raising=False)
 
     # Execute & Assert
-    with pytest.raises(ConfigurationError, match="PRIVATE_KEY not found"):
+    with pytest.raises(ConfigurationError, match="No private key configured"):
         load_env_vars()
 
 
 def test_load_env_vars_invalid_private_key_length(monkeypatch):
     """Test that invalid private key length raises ConfigurationError."""
     # Setup
+    monkeypatch.delenv("KEYSTORE_FILE", raising=False)
     monkeypatch.setenv("PRIVATE_KEY", "0x123")  # Too short
 
-    # Execute & Assert
-    with pytest.raises(ConfigurationError, match="must be 64 hex characters"):
+    # Execute & Assert — key_manager exits on invalid key, converted to ConfigurationError
+    with pytest.raises(ConfigurationError, match="No private key configured"):
         load_env_vars()
 
 
 def test_load_env_vars_invalid_private_key_format(monkeypatch):
     """Test that invalid private key format raises ConfigurationError."""
     # Setup
+    monkeypatch.delenv("KEYSTORE_FILE", raising=False)
     monkeypatch.setenv("PRIVATE_KEY", "0x" + "z" * 64)  # Invalid hex
 
     # Execute & Assert
-    with pytest.raises(ConfigurationError, match="must be a valid hex string"):
+    with pytest.raises(ConfigurationError, match="No private key configured"):
         load_env_vars()
 
 
 def test_load_env_vars_without_0x_prefix(monkeypatch):
     """Test that private key without 0x prefix is handled correctly."""
     # Setup
+    monkeypatch.delenv("KEYSTORE_FILE", raising=False)
     monkeypatch.setenv("PRIVATE_KEY", "a" * 64)
 
     # Execute

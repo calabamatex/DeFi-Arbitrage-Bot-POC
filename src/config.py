@@ -69,8 +69,9 @@ class Config:
     EXECUTION_MODE: str = os.getenv("EXECUTION_MODE", "testnet")  # testnet or mainnet
     DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() == "true"
 
-    # Private key for transactions
-    PRIVATE_KEY: Optional[str] = os.getenv("PRIVATE_KEY")
+    # Private key: loaded at runtime via src.utils.key_manager (keystore or env var).
+    # NEVER store private keys in .env files. See: python -m src.utils.key_manager create
+    KEYSTORE_FILE: Optional[str] = os.getenv("KEYSTORE_FILE")
 
     # Profit thresholds
     MIN_PROFIT_USD: float = float(os.getenv("MIN_PROFIT_USD", "10.0"))
@@ -83,6 +84,18 @@ class Config:
     # Risk management
     MAX_FLASH_LOAN_AMOUNT_USD: float = float(os.getenv("MAX_FLASH_LOAN_AMOUNT_USD", "100000.0"))
     MAX_SLIPPAGE_PERCENTAGE: float = float(os.getenv("MAX_SLIPPAGE_PERCENTAGE", "2.0"))
+
+    # Token / pair scanning
+    TOKEN_CONFIG_DIR: str = os.getenv(
+        "TOKEN_CONFIG_DIR",
+        os.path.join(os.path.dirname(__file__), "..", "config", "tokens"),
+    )
+    MAX_PAIRS_PER_SCAN: int = int(os.getenv("MAX_PAIRS_PER_SCAN", "50"))
+
+    # Liquidation settings
+    LIQUIDATION_ENABLED: bool = os.getenv("LIQUIDATION_ENABLED", "false").lower() == "true"
+    LIQUIDATION_MIN_PROFIT_USD: float = float(os.getenv("LIQUIDATION_MIN_PROFIT_USD", "50"))
+    LIQUIDATION_SCAN_INTERVAL: int = int(os.getenv("LIQUIDATION_SCAN_INTERVAL", "30"))
 
     # Database
     db = DatabaseConfig()
@@ -98,18 +111,12 @@ class Config:
 
     # Supported chains configuration
     CHAINS: Dict[str, ChainConfig] = {
+        # -- Mainnets --
         "polygon": ChainConfig(
             chain_id=137,
             name="Polygon",
             rpc_url=os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com"),
             explorer_url="https://polygonscan.com",
-            native_token="MATIC",
-        ),
-        "mumbai": ChainConfig(
-            chain_id=80001,
-            name="Mumbai Testnet",
-            rpc_url=os.getenv("MUMBAI_RPC_URL", "https://rpc-mumbai.maticvigil.com"),
-            explorer_url="https://mumbai.polygonscan.com",
             native_token="MATIC",
         ),
         "arbitrum": ChainConfig(
@@ -133,6 +140,21 @@ class Config:
             explorer_url="https://basescan.org",
             native_token="ETH",
         ),
+        # -- Testnets --
+        "polygon_amoy": ChainConfig(
+            chain_id=80002,
+            name="Polygon Amoy Testnet",
+            rpc_url=os.getenv("POLYGON_AMOY_RPC_URL", "https://rpc-amoy.polygon.technology"),
+            explorer_url="https://amoy.polygonscan.com",
+            native_token="MATIC",
+        ),
+        "arbitrum_sepolia": ChainConfig(
+            chain_id=421614,
+            name="Arbitrum Sepolia Testnet",
+            rpc_url=os.getenv("ARBITRUM_SEPOLIA_RPC_URL", "https://sepolia-rollup.arbitrum.io/rpc"),
+            explorer_url="https://sepolia.arbiscan.io",
+            native_token="ETH",
+        ),
     }
 
     # Active chains (based on execution mode)
@@ -140,7 +162,7 @@ class Config:
     def get_active_chains(cls) -> List[str]:
         """Get list of active chains based on execution mode"""
         if cls.EXECUTION_MODE == "testnet":
-            return ["mumbai"]
+            return ["polygon_amoy", "arbitrum_sepolia"]
         else:
             return ["polygon", "arbitrum", "optimism", "base"]
 
@@ -149,8 +171,11 @@ class Config:
         """Validate configuration"""
         errors = []
 
-        if not cls.PRIVATE_KEY and cls.EXECUTION_MODE != "testnet":
-            errors.append("PRIVATE_KEY is required for mainnet execution")
+        if not cls.KEYSTORE_FILE and not os.getenv("PRIVATE_KEY") and cls.EXECUTION_MODE != "testnet":
+            errors.append(
+                "No private key configured for mainnet. Set KEYSTORE_FILE (recommended) "
+                "or PRIVATE_KEY env var. Run: python -m src.utils.key_manager create"
+            )
 
         if cls.telegram.enabled and (not cls.telegram.bot_token or not cls.telegram.chat_id):
             errors.append("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID required when Telegram is enabled")

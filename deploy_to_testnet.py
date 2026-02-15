@@ -20,8 +20,9 @@ from dotenv import load_dotenv
 load_dotenv('.env.testnet')
 
 # Configuration
+from src.utils.key_manager import load_private_key
 TESTNET_RPC = "https://rpc-amoy.polygon.technology"
-PRIVATE_KEY = os.getenv('PRIVATE_KEY')
+PRIVATE_KEY = load_private_key()
 AAVE_POOL_PROVIDER = "0x4CeDCB57Af02293231BAA9D39354D6BFDFD251e0"
 UNISWAP_V3_FACTORY = "0x0227628f3F023bb0B980b67D528571c95c6DaC1c"
 

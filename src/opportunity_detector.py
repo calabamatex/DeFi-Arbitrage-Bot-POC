@@ -6,7 +6,9 @@ Monitors DEX prices and identifies profitable arbitrage opportunities.
 
 import os
 import time
+import random
 import logging
+from itertools import combinations, permutations
 from typing import List, Dict, Optional, Tuple
 from decimal import Decimal
 from datetime import datetime
@@ -18,15 +20,11 @@ from dotenv import load_dotenv
 
 from src.db.database import get_db
 from src.db.models import Opportunity, OpportunityStatus, Chain, DEX, Token
+from src.utils.token_registry import TokenRegistry
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 
@@ -53,7 +51,9 @@ class OpportunityDetector:
         max_gas_price_gwei: int = 100,
         check_interval: int = 5,
         min_flash_loan: int = None,
-        max_flash_loan: int = None
+        max_flash_loan: int = None,
+        token_config_dir: str = None,
+        max_pairs: int = None,
     ):
         """
         Initialize the opportunity detector.
@@ -65,6 +65,8 @@ class OpportunityDetector:
             check_interval: Seconds between price checks
             min_flash_loan: Minimum flash loan amount (in smallest unit, e.g., USDC has 6 decimals)
             max_flash_loan: Maximum flash loan amount (in smallest unit)
+            token_config_dir: Directory containing token JSON configs (default: config/tokens/)
+            max_pairs: Maximum trading pairs to scan per iteration
         """
         self.web3 = web3
         self.min_profit_usd = min_profit_usd
@@ -83,7 +85,10 @@ class OpportunityDetector:
             os.getenv("QUICKSWAP_ROUTER", "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff")
         )
 
-        # Token addresses
+        # Initialize contracts
+        self._init_contracts()
+
+        # Well-known token shortcuts (always available for backward compat)
         self.usdc = self.web3.to_checksum_address(
             os.getenv("USDC_ADDRESS", "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
         )
@@ -97,16 +102,36 @@ class OpportunityDetector:
             os.getenv("DAI_ADDRESS", "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063")
         )
 
-        # Initialize contracts
-        self._init_contracts()
+        # --- Dynamic token loading via TokenRegistry ---
+        _max_pairs = max_pairs or int(os.getenv("MAX_PAIRS_PER_SCAN", "50"))
+        self.token_registry = TokenRegistry(
+            web3=web3,
+            config_dir=token_config_dir or os.getenv("TOKEN_CONFIG_DIR"),
+            max_pairs=_max_pairs,
+        )
+        loaded = self.token_registry.load_tokens()
 
-        # Trading pairs to monitor
-        self.trading_pairs = [
-            (self.usdc, self.wmatic),
-            (self.usdc, self.weth),
-            (self.wmatic, self.weth),
-            (self.dai, self.usdc),
-        ]
+        if loaded > 0:
+            # Use registry for decimals and pairs
+            self.token_decimals = self.token_registry.get_decimals_map()
+            self.trading_pairs = self.token_registry.generate_pairs(
+                require_stablecoin_leg=False,
+            )
+        else:
+            # Fallback: hardcoded defaults (backward compat for tests / missing config)
+            logger.warning("No token config loaded — using hardcoded defaults")
+            self.token_decimals = {
+                self.usdc.lower(): 6,
+                self.wmatic.lower(): 18,
+                self.weth.lower(): 18,
+                self.dai.lower(): 18,
+            }
+            self.trading_pairs = [
+                (self.usdc, self.wmatic),
+                (self.usdc, self.weth),
+                (self.wmatic, self.weth),
+                (self.dai, self.usdc),
+            ]
 
         logger.info(f"OpportunityDetector initialized")
         logger.info(f"Min profit: ${min_profit_usd}")
@@ -170,6 +195,67 @@ class OpportunityDetector:
             abi=router_abi
         )
 
+        # Curve adapter (optional — initialized if CURVE_ADAPTER_ADDRESS is set)
+        self.curve_adapter_address = os.getenv("CURVE_ADAPTER_ADDRESS")
+        self.curve_adapter_contract = None
+        if self.curve_adapter_address:
+            curve_adapter_abi = [
+                {
+                    "inputs": [
+                        {"internalType": "address", "name": "tokenIn", "type": "address"},
+                        {"internalType": "address", "name": "tokenOut", "type": "address"},
+                        {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+                    ],
+                    "name": "getQuote",
+                    "outputs": [{"internalType": "uint256", "name": "amountOut", "type": "uint256"}],
+                    "stateMutability": "view",
+                    "type": "function",
+                },
+                {
+                    "inputs": [
+                        {"internalType": "address", "name": "tokenIn", "type": "address"},
+                        {"internalType": "address", "name": "tokenOut", "type": "address"},
+                    ],
+                    "name": "hasPool",
+                    "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+                    "stateMutability": "view",
+                    "type": "function",
+                },
+            ]
+            self.curve_adapter_contract = self.web3.eth.contract(
+                address=self.web3.to_checksum_address(self.curve_adapter_address),
+                abi=curve_adapter_abi,
+            )
+            logger.info(f"Curve adapter configured: {self.curve_adapter_address}")
+
+    def get_curve_quote(
+        self,
+        token_in: str,
+        token_out: str,
+        amount_in: int,
+    ) -> Optional[int]:
+        """
+        Get quote from Curve via the CurveAdapter's on-chain getQuote.
+
+        Args:
+            token_in: Input token address
+            token_out: Output token address
+            amount_in: Amount to swap
+
+        Returns:
+            Amount out or None if quote fails or Curve not configured
+        """
+        if not self.curve_adapter_contract:
+            return None
+        try:
+            amount_out = self.curve_adapter_contract.functions.getQuote(
+                token_in, token_out, amount_in
+            ).call()
+            return amount_out
+        except Exception as e:
+            logger.debug(f"Curve quote failed for {token_in[:6]}→{token_out[:6]}: {e}")
+            return None
+
     def get_v3_quote(
         self,
         token_in: str,
@@ -201,7 +287,7 @@ class OpportunityDetector:
             amount_out = result[0]  # First element is amountOut
             return amount_out
         except Exception as e:
-            logger.debug(f"V3 quote failed for {token_in[:6]}→{token_out[:6]} fee={fee}: {e}")
+            logger.warning(f"V3 quote failed for {token_in[:6]}→{token_out[:6]} fee={fee}: {e}")
             return None
 
     def get_v2_quote(
@@ -229,7 +315,7 @@ class OpportunityDetector:
             ).call()
             return amounts[-1]  # Last element is output amount
         except Exception as e:
-            logger.debug(f"V2 quote failed for {token_in[:6]}→{token_out[:6]}: {e}")
+            logger.warning(f"V2 quote failed for {token_in[:6]}→{token_out[:6]}: {e}")
             return None
 
     def find_best_v3_fee(
@@ -329,20 +415,162 @@ class OpportunityDetector:
 
         return opportunities
 
-    def _calculate_profit_after_fees(self, amount_in: int, gross_profit: int) -> int:
+    def _calculate_profit_after_fees(self, amount_in: int, gross_profit: int, flash_loan_fee_bps: int = None) -> int:
         """
         Calculate net profit after flash loan fees.
 
         Args:
             amount_in: Flash loan amount
             gross_profit: Profit before fees
+            flash_loan_fee_bps: Flash loan fee in bps (default: FLASH_LOAN_FEE_BPS)
 
         Returns:
             Net profit after fees
         """
-        # Flash loan fee: 0.05% = 5 basis points
-        flash_loan_fee = (amount_in * self.FLASH_LOAN_FEE_BPS) // 10000
+        fee_bps = flash_loan_fee_bps if flash_loan_fee_bps is not None else self.FLASH_LOAN_FEE_BPS
+        flash_loan_fee = (amount_in * fee_bps) // 10000
         return gross_profit - flash_loan_fee
+
+    # ------------------------------------------------------------------
+    # Multi-DEX quote aggregation
+    # ------------------------------------------------------------------
+
+    def _get_all_dex_quotes(
+        self,
+        token_in: str,
+        token_out: str,
+        amount_in: int,
+    ) -> List[Tuple[str, int, Optional[int]]]:
+        """
+        Get quotes from all available DEXs for a single swap.
+
+        Returns:
+            List of (dex_name, amount_out, fee_or_none) tuples, sorted best first.
+        """
+        quotes: List[Tuple[str, int, Optional[int]]] = []
+
+        # Uniswap V3 — try all fee tiers
+        v3_out, v3_fee = self.find_best_v3_fee(token_in, token_out, amount_in)
+        if v3_out:
+            quotes.append(('uniswap_v3', v3_out, v3_fee))
+
+        # QuickSwap / V2
+        v2_out = self.get_v2_quote(token_in, token_out, amount_in)
+        if v2_out:
+            quotes.append(('quickswap', v2_out, None))
+
+        # Curve
+        curve_out = self.get_curve_quote(token_in, token_out, amount_in)
+        if curve_out:
+            quotes.append(('curve', curve_out, None))
+
+        # Sort by best output descending
+        quotes.sort(key=lambda q: q[1], reverse=True)
+        return quotes
+
+    # ------------------------------------------------------------------
+    # Triangular arbitrage detection
+    # ------------------------------------------------------------------
+
+    def calculate_triangular_arbitrage(
+        self,
+        token_a: str,
+        token_b: str,
+        token_c: str,
+        amount_in: int,
+    ) -> Optional[Dict]:
+        """
+        Find best 3-leg arbitrage path: A → B → C → A.
+
+        Tests all DEX combinations per leg and picks the best.
+
+        Args:
+            token_a: Flash loan token (start and end)
+            token_b: Intermediate token 1
+            token_c: Intermediate token 2
+            amount_in: Flash loan amount
+
+        Returns:
+            Opportunity dict or None
+        """
+        # Leg 1: A → B
+        leg1_quotes = self._get_all_dex_quotes(token_a, token_b, amount_in)
+        if not leg1_quotes:
+            return None
+        dex1, amount_after_1, fee1 = leg1_quotes[0]
+
+        # Leg 2: B → C
+        leg2_quotes = self._get_all_dex_quotes(token_b, token_c, amount_after_1)
+        if not leg2_quotes:
+            return None
+        dex2, amount_after_2, fee2 = leg2_quotes[0]
+
+        # Leg 3: C → A
+        leg3_quotes = self._get_all_dex_quotes(token_c, token_a, amount_after_2)
+        if not leg3_quotes:
+            return None
+        dex3, amount_after_3, fee3 = leg3_quotes[0]
+
+        gross_profit = amount_after_3 - amount_in
+        net_profit = self._calculate_profit_after_fees(amount_in, gross_profit)
+
+        if net_profit <= 0:
+            return None
+
+        return {
+            'direction': 'triangular',
+            'token_in': token_a,
+            'token_out': token_a,  # same as token_in for triangular
+            'amount_in': amount_in,
+            'token_path': [token_a, token_b, token_c, token_a],
+            'dex_path': [dex1, dex2, dex3],
+            'amounts': [amount_in, amount_after_1, amount_after_2, amount_after_3],
+            'fees': [fee1, fee2, fee3],
+            'gross_profit': gross_profit,
+            'net_profit': net_profit,
+        }
+
+    def scan_triangular_opportunities(self) -> List[Dict]:
+        """
+        Scan 3-token combinations for triangular arbitrage.
+
+        Returns:
+            List of profitable triangular opportunities.
+        """
+        all_opportunities: List[Dict] = []
+        tokens = list({addr for pair in self.trading_pairs for addr in pair})
+
+        if len(tokens) < 3:
+            return all_opportunities
+
+        # Generate 3-token combos and test all orderings
+        tested = 0
+        for combo in combinations(tokens, 3):
+            for perm in permutations(combo):
+                a, b, c = perm
+                tested += 1
+
+                # Quick test at min flash loan amount
+                decimals_a = self.token_decimals.get(a.lower(), 18)
+                test_amount = self.min_flash_loan
+
+                opp = self.calculate_triangular_arbitrage(a, b, c, test_amount)
+                if opp and self.is_profitable_after_gas(
+                    opp['net_profit'], a, token_decimals=decimals_a
+                ):
+                    opp['token_decimals'] = decimals_a
+                    all_opportunities.append(opp)
+                    logger.info(
+                        f"Triangular opportunity: "
+                        f"{' → '.join(opp['dex_path'])} | "
+                        f"Profit: {opp['net_profit'] / 10**decimals_a:.4f}"
+                    )
+
+        logger.info(
+            f"Scanned {tested} triangular paths, "
+            f"found {len(all_opportunities)} profitable"
+        )
+        return all_opportunities
 
     def estimate_gas_cost(self) -> int:
         """
@@ -390,9 +618,8 @@ class OpportunityDetector:
         gas_cost_wei = self.estimate_gas_cost()
         gas_cost_eth = gas_cost_wei / 10**18
 
-        # Assume MATIC price ~$0.80 (in production, fetch from oracle)
-        matic_price_usd = 0.80
-        gas_cost_usd = gas_cost_eth * matic_price_usd
+        native_price_usd = float(os.getenv('NATIVE_TOKEN_PRICE_USD', '0.80'))
+        gas_cost_usd = gas_cost_eth * native_price_usd
 
         net_profit_usd = profit_usd - gas_cost_usd
 
@@ -513,13 +740,16 @@ class OpportunityDetector:
 
         return best_opp
 
-    def log_opportunity(self, opportunity: Dict, token_decimals: int = 6):
+    def log_opportunity(self, opportunity: Dict, token_decimals: int = 6) -> Optional[str]:
         """
-        Log opportunity to database.
+        Log opportunity to database and attach the ID to the opportunity dict.
 
         Args:
-            opportunity: Opportunity details
+            opportunity: Opportunity details (mutated: 'opportunity_id' key added)
             token_decimals: Token decimals for display
+
+        Returns:
+            The generated opportunity_id string, or None on failure
         """
         try:
             with get_db() as db:
@@ -529,13 +759,20 @@ class OpportunityDetector:
                 ).hex()
 
                 # Create opportunity record
+                # Determine expected_amount_out based on direction
+                if opportunity['direction'] == 'V3→V2':
+                    expected_amount_out = opportunity.get('amount_after_v2', opportunity['amount_in'] + opportunity['net_profit'])
+                else:
+                    expected_amount_out = opportunity.get('amount_after_v3', opportunity['amount_in'] + opportunity['net_profit'])
+
                 opp = Opportunity(
                     opportunity_id=opp_id,
-                    chain_id=137,  # Polygon
+                    chain_id=self.web3.eth.chain_id,
                     status=OpportunityStatus.DETECTED,
                     token_in=opportunity['token_in'],
                     token_out=opportunity['token_out'],
                     amount_in=opportunity['amount_in'],
+                    expected_amount_out=expected_amount_out,
                     expected_profit=opportunity['net_profit'],
                     dex_path=opportunity['dex_path'],
                     token_path=[opportunity['token_in'], opportunity['token_out'], opportunity['token_in']],
@@ -550,12 +787,18 @@ class OpportunityDetector:
                 db.add(opp)
                 db.commit()
 
+                # Attach ID to opportunity dict so callers can reference it
+                opportunity['opportunity_id'] = opp_id
+
                 profit_display = opportunity['net_profit'] / (10 ** token_decimals)
                 logger.info(f"✅ Opportunity logged: {opportunity['direction']} | "
                            f"Net profit: {profit_display:.6f} tokens | ID: {opp_id[:10]}...")
 
+                return opp_id
+
         except Exception as e:
             logger.error(f"Failed to log opportunity: {e}")
+            return None
 
     def scan_opportunities(self) -> List[Dict]:
         """
@@ -570,6 +813,9 @@ class OpportunityDetector:
 
         for token_a, token_b in self.trading_pairs:
             try:
+                # Determine token_a decimals for this pair
+                decimals_a = self.token_decimals.get(token_a.lower(), 18)
+
                 # Quick test with minimum amount to check if any opportunity exists
                 quick_test = self.calculate_arbitrage(token_a, token_b, self.min_flash_loan)
 
@@ -580,7 +826,8 @@ class OpportunityDetector:
                 # Extract directions that are profitable
                 profitable_directions = []
                 for opp in quick_test:
-                    if self.is_profitable_after_gas(opp['net_profit'], opp['token_in'], token_decimals=6):
+                    opp_decimals = self.token_decimals.get(opp['token_in'].lower(), decimals_a)
+                    if self.is_profitable_after_gas(opp['net_profit'], opp['token_in'], token_decimals=opp_decimals):
                         profitable_directions.append(opp['direction'])
 
                 if not profitable_directions:
@@ -589,7 +836,7 @@ class OpportunityDetector:
 
                 # For each profitable direction, find optimal flash loan amount
                 for direction in profitable_directions:
-                    logger.info(f"💰 Found {direction} opportunity for {token_a[:6]}↔{token_b[:6]}, optimizing...")
+                    logger.info(f"Found {direction} opportunity for {token_a[:6]}↔{token_b[:6]}, optimizing...")
 
                     optimal_opp = self.find_optimal_flash_loan_amount(
                         token_a,
@@ -597,15 +844,25 @@ class OpportunityDetector:
                         direction,
                         min_amount=self.min_flash_loan,
                         max_amount=self.max_flash_loan,
-                        token_decimals=6
+                        token_decimals=decimals_a
                     )
 
                     if optimal_opp:
+                        optimal_opp['token_decimals'] = decimals_a
                         all_opportunities.append(optimal_opp)
-                        self.log_opportunity(optimal_opp)
+                        self.log_opportunity(optimal_opp, token_decimals=decimals_a)
 
             except Exception as e:
                 logger.error(f"Error scanning {token_a[:6]}↔{token_b[:6]}: {e}")
+
+        # Triangular scan
+        try:
+            tri_opps = self.scan_triangular_opportunities()
+            for opp in tri_opps:
+                all_opportunities.append(opp)
+                self.log_opportunity(opp, token_decimals=opp.get('token_decimals', 6))
+        except Exception as e:
+            logger.error(f"Error in triangular scan: {e}")
 
         return all_opportunities
 
@@ -634,7 +891,7 @@ class OpportunityDetector:
 
                     if current_gas_gwei > self.max_gas_price_gwei:
                         logger.warning(f"⚠️  Gas too high ({current_gas_gwei:.2f} > {self.max_gas_price_gwei}), skipping...")
-                        time.sleep(self.check_interval)
+                        time.sleep(self.check_interval + random.uniform(0, self.check_interval * 0.5))
                         continue
                 except Exception as e:
                     logger.warning(f"Failed to check gas price: {e}")
@@ -650,8 +907,11 @@ class OpportunityDetector:
                 if not continuous:
                     break
 
-                logger.info(f"Sleeping for {self.check_interval} seconds...")
-                time.sleep(self.check_interval)
+                # Add random jitter (0-50% of interval) to avoid predictable timing
+                jitter = random.uniform(0, self.check_interval * 0.5)
+                sleep_time = self.check_interval + jitter
+                logger.info(f"Sleeping for {sleep_time:.1f} seconds...")
+                time.sleep(sleep_time)
 
         except KeyboardInterrupt:
             logger.info("\n⛔ Detector stopped by user")

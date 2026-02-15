@@ -1,0 +1,55 @@
+{
+  "chain_id": 80002,
+  "chain_name": "polygon_amoy",
+  "note": "Testnet tokens — addresses from Aave V3 faucet on Amoy. Liquidity is minimal.",
+  "tokens": [
+    {
+      "symbol": "USDC",
+      "address": "0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582",
+      "decimals": 6,
+      "is_stablecoin": true
+    },
+    {
+      "symbol": "USDT",
+      "address": "0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0",
+      "decimals": 6,
+      "is_stablecoin": true
+    },
+    {
+      "symbol": "DAI",
+      "address": "0xC87385b5E62099f92d490750Fcd6C901a524BBcA",
+      "decimals": 18,
+      "is_stablecoin": true
+    },
+    {
+      "symbol": "WETH",
+      "address": "0x0ae690AAD8663AAb12461B67E34DE6d41F8f0725",
+      "decimals": 18,
+      "is_stablecoin": false
+    },
+    {
+      "symbol": "WMATIC",
+      "address": "0x360ad4f9a9A8EFe9A8DCB5f461c4Cc1047E1Dcf9",
+      "decimals": 18,
+      "is_stablecoin": false
+    },
+    {
+      "symbol": "WBTC",
+      "address": "0x97e8dE167578050F04a70eB535dce96a1e32c55A",
+      "decimals": 8,
+      "is_stablecoin": false
+    },
+    {
+      "symbol": "LINK",
+      "address": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+      "decimals": 18,
+      "is_stablecoin": false
+    },
+    {
+      "symbol": "AAVE",
+      "address": "0x88541670E55cC13FC53a3537d3a3D037A57A0B1b",
+      "decimals": 18,
+      "is_stablecoin": false
+    }
+  ]
+}

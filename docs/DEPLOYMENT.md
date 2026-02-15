@@ -26,15 +26,14 @@ Complete guide for deploying the arbitrage bot to testnet and mainnet.
 - Telegram bot (optional but recommended)
 - RPC provider account (optional for dedicated RPC)
 
-### Get Mumbai Testnet MATIC
+### Get Testnet Tokens
 
 ```bash
-# Visit faucet
-https://faucet.polygon.technology/
-
-# Enter your wallet address
-# Request 5+ MATIC
+# Polygon Amoy — visit faucet.polygon.technology
+# Arbitrum Sepolia — use Alchemy faucet or bridge from Sepolia ETH
 ```
+
+> **Note:** Mumbai testnet is deprecated. Use Polygon Amoy (chain ID 80002) or Arbitrum Sepolia (chain ID 421614). See [QUICKSTART.md](QUICKSTART.md) for the streamlined setup flow.
 
 ## Testnet Deployment
 

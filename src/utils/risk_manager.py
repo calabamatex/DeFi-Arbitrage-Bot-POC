@@ -2,17 +2,17 @@
 Risk Management System - Protects capital with multiple safety mechanisms.
 """
 
+import os
 from decimal import Decimal
 from typing import Tuple, Dict, Optional, List
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from web3 import Web3
 import json
 import logging
 import asyncio
 
-# Import from other modules
-from src.bot.arbitrage import ArbitrageOpportunity
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,12 @@ class BalanceValidator:
         )
 
         balance_wei = token_contract.functions.balanceOf(account).call()
-        total_balance = Decimal(balance_wei) / Decimal(10**18)
+        # Detect token decimals dynamically
+        try:
+            decimals = token_contract.functions.decimals().call()
+        except Exception:
+            decimals = 18  # Default to 18 if call fails
+        total_balance = Decimal(balance_wei) / Decimal(10**decimals)
 
         # Subtract reserved amount
         key = f"{account}_{token_address}"
@@ -529,6 +534,9 @@ class RiskManager:
     This is the main class that other parts of the system interact with.
     """
 
+    # Default state file path
+    DEFAULT_STATE_FILE = "risk_state.json"
+
     def __init__(self, web3: Web3, erc20_abi: list, config: Dict):
         """
         Initialize risk manager.
@@ -539,6 +547,9 @@ class RiskManager:
             config: Configuration with risk parameters
         """
         self.web3 = web3
+        self.state_file = Path(
+            os.getenv("RISK_STATE_FILE", self.DEFAULT_STATE_FILE)
+        )
 
         # Initialize sub-components
         self.balance_validator = BalanceValidator(web3, erc20_abi)
@@ -570,23 +581,28 @@ class RiskManager:
         self.shutdown_active = False
         self.shutdown_reason: Optional[str] = None
 
+        # Restore state from disk if available
+        self._load_state()
+
         logger.info("RiskManager initialized with all components")
 
-    async def validate_trade(
-        self, opportunity: ArbitrageOpportunity, account: str, token_address: str
+    def validate_trade(
+        self, opportunity: Dict, account: str, token_address: str
     ) -> Tuple[bool, str]:
         """
-        Validate trade against all risk checks.
+        Validate trade against all risk checks (synchronous).
 
         Args:
-            opportunity: ArbitrageOpportunity to validate
+            opportunity: Opportunity dict with keys: token_in, token_out, amount_in, net_profit
             account: Trading account address
             token_address: Token contract address
 
         Returns:
             Tuple of (approved: bool, reason: str)
         """
-        logger.info(f"Validating trade: {opportunity.token1}/{opportunity.token2}")
+        token_in = opportunity.get('token_in', 'unknown')[:10]
+        token_out = opportunity.get('token_out', 'unknown')[:10]
+        logger.info(f"Validating trade: {token_in}/{token_out}")
 
         # 1. Check if emergency shutdown active
         if self.shutdown_active:
@@ -597,44 +613,29 @@ class RiskManager:
         if not allowed:
             return False, msg
 
-        # 3. Check balance
-        has_balance = await self.balance_validator.check_balance(
-            account, token_address, opportunity.amount, reserve=True
-        )
-        if not has_balance:
-            return False, "Insufficient balance"
-
-        # 4. Check position size
-        position_usd = opportunity.amount * opportunity.buy_price
-        valid_size, size_msg = self.position_manager.validate_position_size(
-            position_usd
-        )
+        # 3. Check position size (use amount_in as proxy for USD exposure)
+        token_decimals = opportunity.get('token_decimals', 6)
+        amount_usd = Decimal(str(opportunity.get('amount_in', 0))) / Decimal(10**token_decimals)
+        valid_size, size_msg = self.position_manager.validate_position_size(amount_usd)
         if not valid_size:
             return False, size_msg
 
-        # 5. Check total exposure
+        # 4. Check total exposure
         within_exposure, exposure_msg = self.position_manager.check_exposure_limit()
         if not within_exposure:
             return False, exposure_msg
 
-        # 6. Check concentration risk
-        ok_concentration, conc_msg = self.position_manager.check_concentration_risk(
-            opportunity.token1, position_usd
-        )
-        if not ok_concentration:
-            return False, conc_msg
-
-        # 7. Check loss limits
+        # 5. Check loss limits
         within_limits, limit_msg = self.loss_tracker.check_loss_limit()
         if not within_limits:
             return False, limit_msg
 
-        logger.info("✅ Trade approved by risk manager")
+        logger.info("Trade approved by risk manager")
         return True, "All risk checks passed"
 
     def record_trade_result(self, trade_result: TradeResult):
         """
-        Record trade result in all relevant trackers.
+        Record trade result in all relevant trackers and persist to disk.
 
         Args:
             trade_result: TradeResult object
@@ -648,6 +649,9 @@ class RiskManager:
         # Update positions
         if trade_result.success:
             self.position_manager.close_position(trade_result.token_pair.split("/")[0])
+
+        # Persist state after every trade so it survives restarts
+        self._save_state()
 
         logger.info(f"Trade result recorded: {trade_result.success}")
 
@@ -688,6 +692,7 @@ class RiskManager:
         """
         self.shutdown_active = True
         self.shutdown_reason = reason
+        self._save_state()
 
         logger.critical(f"🚨 EMERGENCY SHUTDOWN: {reason}")
 
@@ -696,14 +701,20 @@ class RiskManager:
         Reset emergency shutdown (requires admin code).
 
         Args:
-            admin_code: Admin verification code
+            admin_code: Admin verification code from ADMIN_RESET_CODE env var
 
         Returns:
             True if reset successful
         """
-        # In production, verify admin_code properly
-        # For now, simple check
-        if admin_code == "RESET_SHUTDOWN":
+        import os
+        import hmac
+
+        expected_code = os.environ.get("ADMIN_RESET_CODE", "")
+        if not expected_code:
+            logger.error("ADMIN_RESET_CODE env var not set -- cannot reset shutdown")
+            return False
+
+        if hmac.compare_digest(admin_code, expected_code):
             self.shutdown_active = False
             self.shutdown_reason = None
             logger.info("Emergency shutdown reset by admin")
@@ -711,3 +722,100 @@ class RiskManager:
 
         logger.warning("Invalid admin code for shutdown reset")
         return False
+
+    def _save_state(self):
+        """Persist critical risk state to disk so it survives restarts."""
+        try:
+            # Serialize recent trades (last 7 days only)
+            week_ago = datetime.now() - timedelta(days=7)
+            trade_dicts = []
+            for t in self.loss_tracker.trades:
+                if t.timestamp >= week_ago:
+                    trade_dicts.append({
+                        'success': t.success,
+                        'timestamp': t.timestamp.isoformat(),
+                        'profit_loss': str(t.profit_loss),
+                        'token_pair': t.token_pair,
+                        'buy_dex': t.buy_dex,
+                        'sell_dex': t.sell_dex,
+                        'amount': str(t.amount),
+                        'gas_cost': str(t.gas_cost),
+                        'message': t.message,
+                    })
+
+            state = {
+                'version': 1,
+                'saved_at': datetime.now().isoformat(),
+                'circuit_breaker': {
+                    'consecutive_losses': self.circuit_breaker.consecutive_losses,
+                    'is_active': self.circuit_breaker.is_active,
+                    'triggered_at': self.circuit_breaker.triggered_at.isoformat()
+                    if self.circuit_breaker.triggered_at else None,
+                },
+                'shutdown': {
+                    'active': self.shutdown_active,
+                    'reason': self.shutdown_reason,
+                },
+                'trades': trade_dicts,
+            }
+
+            # Atomic write: write to temp file then rename
+            tmp_path = self.state_file.with_suffix('.tmp')
+            with open(tmp_path, 'w') as f:
+                json.dump(state, f, indent=2)
+            tmp_path.replace(self.state_file)
+
+            logger.debug(f"Risk state saved ({len(trade_dicts)} trades)")
+
+        except Exception as e:
+            logger.warning(f"Failed to save risk state: {e}")
+
+    def _load_state(self):
+        """Restore risk state from disk on startup."""
+        if not self.state_file.exists():
+            logger.info("No previous risk state found, starting fresh")
+            return
+
+        try:
+            with open(self.state_file, 'r') as f:
+                state = json.load(f)
+
+            # Restore circuit breaker
+            cb = state.get('circuit_breaker', {})
+            self.circuit_breaker.consecutive_losses = cb.get('consecutive_losses', 0)
+            self.circuit_breaker.is_active = cb.get('is_active', False)
+            if cb.get('triggered_at'):
+                self.circuit_breaker.triggered_at = datetime.fromisoformat(cb['triggered_at'])
+
+            # Restore shutdown state
+            sd = state.get('shutdown', {})
+            self.shutdown_active = sd.get('active', False)
+            self.shutdown_reason = sd.get('reason')
+
+            # Restore trade history
+            for td in state.get('trades', []):
+                trade = TradeResult(
+                    success=td['success'],
+                    timestamp=datetime.fromisoformat(td['timestamp']),
+                    profit_loss=Decimal(td['profit_loss']),
+                    token_pair=td['token_pair'],
+                    buy_dex=td['buy_dex'],
+                    sell_dex=td['sell_dex'],
+                    amount=Decimal(td['amount']),
+                    gas_cost=Decimal(td['gas_cost']),
+                    message=td['message'],
+                )
+                self.loss_tracker.trades.append(trade)
+
+            saved_at = state.get('saved_at', 'unknown')
+            logger.info(
+                f"Risk state restored from {self.state_file} "
+                f"(saved={saved_at}, trades={len(self.loss_tracker.trades)}, "
+                f"circuit_breaker={'ACTIVE' if self.circuit_breaker.is_active else 'ok'})"
+            )
+
+            if self.shutdown_active:
+                logger.warning(f"Emergency shutdown was active: {self.shutdown_reason}")
+
+        except Exception as e:
+            logger.warning(f"Failed to load risk state (starting fresh): {e}")

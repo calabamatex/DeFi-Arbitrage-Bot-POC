@@ -774,7 +774,7 @@ CHAIN_ID=42161
 CHAIN_NAME=arbitrum
 
 # Wallet (same key, different chain)
-PRIVATE_KEY=0x0bfca4742670ad3c4574aa959c8a114f2a2fcc52f8a8c3874553dd1ab3c9d5b2
+PRIVATE_KEY=your_private_key_here
 
 # Execution Mode
 DRY_RUN=true

@@ -31,9 +31,16 @@ interface IUniswapV2Router02 {
 /**
  * @title UniswapV2Adapter
  * @notice Adapter for executing swaps on Uniswap V2 and forks (SushiSwap, QuickSwap)
+ * @dev Implements IDEXAdapter interface with access control (C-01, C-02)
  */
 contract UniswapV2Adapter {
     using SafeERC20 for IERC20;
+
+    /// @notice Contract owner
+    address public owner;
+
+    /// @notice Authorized callers (e.g., FlashLoanArbitrageV2)
+    mapping(address => bool) public authorized;
 
     /// @notice Router address
     IUniswapV2Router02 public immutable router;
@@ -41,61 +48,59 @@ contract UniswapV2Adapter {
     /// @notice DEX name for identification
     string public dexName;
 
+    /// @notice Events
+    event AuthorizedUpdated(address indexed account, bool status);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /// @notice Errors
+    error Unauthorized();
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert Unauthorized();
+        _;
+    }
+
+    modifier onlyAuthorized() {
+        if (!authorized[msg.sender]) revert Unauthorized();
+        _;
+    }
+
     constructor(address _router, string memory _dexName) {
         router = IUniswapV2Router02(_router);
         dexName = _dexName;
+        owner = msg.sender;
+        authorized[msg.sender] = true;
     }
 
     /**
-     * @notice Execute a swap on Uniswap V2
-     * @param tokenIn Input token address
-     * @param tokenOut Output token address
-     * @param amountIn Amount to swap
-     * @param minAmountOut Minimum output amount
-     * @param deadline Transaction deadline
-     * @return amountOut Amount received
+     * @notice Set authorized status for an address
+     * @param account Address to authorize/deauthorize
+     * @param status True to authorize, false to revoke
      */
-    function swap(
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn,
-        uint256 minAmountOut,
-        uint256 deadline
-    ) external returns (uint256 amountOut) {
-        // Transfer tokens from caller
-        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
-
-        // Approve router
-        IERC20(tokenIn).forceApprove(address(router), amountIn);
-
-        // Create path
-        address[] memory path = new address[](2);
-        path[0] = tokenIn;
-        path[1] = tokenOut;
-
-        // Execute swap
-        uint256[] memory amounts = router.swapExactTokensForTokens(
-            amountIn,
-            minAmountOut,
-            path,
-            msg.sender,
-            deadline
-        );
-
-        amountOut = amounts[amounts.length - 1];
-
-        // Reset approval
-        IERC20(tokenIn).forceApprove(address(router), 0);
+    function setAuthorized(address account, bool status) external onlyOwner {
+        authorized[account] = status;
+        emit AuthorizedUpdated(account, status);
     }
 
     /**
-     * @notice Swap directly (called from main contract that already has tokens)
+     * @notice Transfer ownership
+     * @param newOwner New owner address
+     */
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "Invalid owner");
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
+    }
+
+    /**
+     * @notice Swap directly — matches IDEXAdapter interface
      * @param tokenIn Input token
      * @param tokenOut Output token
      * @param amountIn Amount to swap
      * @param minAmountOut Minimum output
-     * @param deadline Deadline
+     * @param deadline Transaction deadline
      * @param recipient Recipient of output tokens
+     * @param data Unused for V2 (kept for interface compatibility)
      * @return amountOut Amount received
      */
     function swapDirect(
@@ -104,8 +109,9 @@ contract UniswapV2Adapter {
         uint256 amountIn,
         uint256 minAmountOut,
         uint256 deadline,
-        address recipient
-    ) external returns (uint256 amountOut) {
+        address recipient,
+        bytes calldata data
+    ) external onlyAuthorized returns (uint256 amountOut) {
         // Approve router
         IERC20(tokenIn).forceApprove(address(router), amountIn);
 
@@ -127,42 +133,6 @@ contract UniswapV2Adapter {
 
         // Reset approval
         IERC20(tokenIn).forceApprove(address(router), 0);
-    }
-
-    /**
-     * @notice Swap with multi-hop path
-     * @param path Token path (e.g., [USDC, WETH, DAI])
-     * @param amountIn Amount to swap
-     * @param minAmountOut Minimum output
-     * @param deadline Deadline
-     * @param recipient Recipient
-     * @return amountOut Amount received
-     */
-    function swapMultiHop(
-        address[] memory path,
-        uint256 amountIn,
-        uint256 minAmountOut,
-        uint256 deadline,
-        address recipient
-    ) external returns (uint256 amountOut) {
-        require(path.length >= 2, "Invalid path");
-
-        // Approve router
-        IERC20(path[0]).forceApprove(address(router), amountIn);
-
-        // Execute swap
-        uint256[] memory amounts = router.swapExactTokensForTokens(
-            amountIn,
-            minAmountOut,
-            path,
-            recipient,
-            deadline
-        );
-
-        amountOut = amounts[amounts.length - 1];
-
-        // Reset approval
-        IERC20(path[0]).forceApprove(address(router), 0);
     }
 
     /**
@@ -186,23 +156,6 @@ contract UniswapV2Adapter {
     }
 
     /**
-     * @notice Get quote for multi-hop swap
-     * @param path Token path
-     * @param amountIn Input amount
-     * @return amountOut Expected output amount
-     */
-    function getQuoteMultiHop(address[] memory path, uint256 amountIn)
-        external
-        view
-        returns (uint256 amountOut)
-    {
-        require(path.length >= 2, "Invalid path");
-
-        uint256[] memory amounts = router.getAmountsOut(amountIn, path);
-        amountOut = amounts[amounts.length - 1];
-    }
-
-    /**
      * @notice Calculate price impact
      * @param tokenIn Input token
      * @param tokenOut Output token
@@ -214,24 +167,21 @@ contract UniswapV2Adapter {
         address tokenOut,
         uint256 amountIn
     ) external view returns (uint256 priceImpactBps) {
-        // Get quote for small amount (for baseline price)
         address[] memory path = new address[](2);
         path[0] = tokenIn;
         path[1] = tokenOut;
 
-        uint256 smallAmount = amountIn / 100; // 1% of amount
+        uint256 smallAmount = amountIn / 100;
         if (smallAmount == 0) smallAmount = 1;
 
         uint256[] memory smallAmounts = router.getAmountsOut(smallAmount, path);
         uint256 baselinePrice = (smallAmounts[1] * 1e18) / smallAmount;
 
-        // Get quote for actual amount
         uint256[] memory actualAmounts = router.getAmountsOut(amountIn, path);
         uint256 actualPrice = (actualAmounts[1] * 1e18) / amountIn;
 
-        // Calculate impact
         if (actualPrice >= baselinePrice) {
-            return 0; // No negative impact
+            return 0;
         }
 
         uint256 priceDiff = baselinePrice - actualPrice;

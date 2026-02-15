@@ -23,8 +23,9 @@ with open('arbitrum_deployment.json', 'r') as f:
     deployment = json.load(f)
 
 # Connect to Arbitrum
+from src.utils.key_manager import load_private_key
 ARBITRUM_RPC = os.getenv('ARBITRUM_RPC_URL')
-PRIVATE_KEY = os.getenv('PRIVATE_KEY')
+PRIVATE_KEY = load_private_key()
 
 web3 = Web3(Web3.HTTPProvider(ARBITRUM_RPC))
 

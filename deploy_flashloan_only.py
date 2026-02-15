@@ -8,8 +8,9 @@ from dotenv import load_dotenv
 
 load_dotenv('.env.arbitrum')
 
+from src.utils.key_manager import load_private_key
 RPC_URL = os.getenv('ARBITRUM_RPC_URL')
-PRIVATE_KEY = os.getenv('PRIVATE_KEY')
+PRIVATE_KEY = load_private_key()
 AAVE_POOL_PROVIDER = "0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb"
 MIN_PROFIT = 5 * 10**6  # $5 in USDC
 MAX_SLIPPAGE_BPS = 100  # 1% max slippage
