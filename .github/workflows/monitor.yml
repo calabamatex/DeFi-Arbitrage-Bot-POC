@@ -1,0 +1,177 @@
+name: Monitor — Health Check
+
+on:
+  schedule:
+    # Every 5 minutes
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      force_rollback:
+        description: "Force rollback to previous image tag"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: monitor
+  cancel-in-progress: true
+
+env:
+  BOT_HEALTH_URL: ${{ vars.BOT_HEALTH_URL || 'http://localhost:8080/health' }}
+  BOT_STATUS_URL: ${{ vars.BOT_HEALTH_URL || 'http://localhost:8080' }}/api/status
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+jobs:
+  health-check:
+    name: Health Check
+    runs-on: ubuntu-latest
+    # Only run if health URL is configured
+    if: vars.BOT_HEALTH_URL != ''
+    outputs:
+      healthy: ${{ steps.check.outputs.healthy }}
+      circuit_breaker: ${{ steps.status.outputs.circuit_breaker }}
+      details: ${{ steps.check.outputs.details }}
+
+    steps:
+      - name: Check bot health endpoint
+        id: check
+        run: |
+          MAX_RETRIES=3
+          RETRY_DELAY=10
+          HEALTHY=false
+
+          for i in $(seq 1 $MAX_RETRIES); do
+            HTTP_CODE=$(curl -s -o /tmp/health_response.json -w "%{http_code}" \
+              --connect-timeout 10 --max-time 30 \
+              "${{ env.BOT_HEALTH_URL }}" 2>/dev/null || echo "000")
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              HEALTHY=true
+              echo "Health check passed (attempt $i)"
+              break
+            fi
+
+            echo "Health check failed with HTTP $HTTP_CODE (attempt $i/$MAX_RETRIES)"
+            if [ $i -lt $MAX_RETRIES ]; then
+              sleep $RETRY_DELAY
+            fi
+          done
+
+          echo "healthy=$HEALTHY" >> "$GITHUB_OUTPUT"
+
+          if [ -f /tmp/health_response.json ]; then
+            DETAILS=$(cat /tmp/health_response.json | head -c 500)
+            echo "details=$DETAILS" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check bot status for circuit breaker
+        id: status
+        if: steps.check.outputs.healthy == 'true'
+        run: |
+          STATUS=$(curl -s --connect-timeout 10 --max-time 30 \
+            "${{ env.BOT_STATUS_URL }}" 2>/dev/null || echo "{}")
+
+          CB_ACTIVE=$(echo "$STATUS" | python3 -c "
+          import sys, json
+          try:
+              data = json.load(sys.stdin)
+              print(str(data.get('circuit_breaker_active', False)).lower())
+          except:
+              print('unknown')
+          " 2>/dev/null || echo "unknown")
+
+          echo "circuit_breaker=$CB_ACTIVE" >> "$GITHUB_OUTPUT"
+          echo "Circuit breaker status: $CB_ACTIVE"
+
+  alert-unhealthy:
+    name: Alert — Bot Unhealthy
+    runs-on: ubuntu-latest
+    needs: health-check
+    if: needs.health-check.outputs.healthy == 'false'
+
+    steps:
+      - name: Send Telegram alert
+        if: env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
+        run: |
+          MESSAGE="🚨 *CRITICAL: Bot Health Check Failed*
+
+          The arbitrage bot health endpoint is not responding.
+
+          • Endpoint: \`${{ env.BOT_HEALTH_URL }}\`
+          • Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          • Response: ${{ needs.health-check.outputs.details || 'No response' }}
+
+          Action required: Check bot logs and infrastructure status."
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="$MESSAGE" \
+            -d parse_mode="Markdown" \
+            --connect-timeout 10 --max-time 30 || true
+
+      - name: Fail workflow to surface in GitHub
+        run: |
+          echo "::error::Bot health check failed — ${{ env.BOT_HEALTH_URL }} is not responding"
+          exit 1
+
+  alert-circuit-breaker:
+    name: Alert — Circuit Breaker Active
+    runs-on: ubuntu-latest
+    needs: health-check
+    if: needs.health-check.outputs.circuit_breaker == 'true'
+
+    steps:
+      - name: Send Telegram alert
+        if: env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
+        run: |
+          MESSAGE="⚠️ *WARNING: Circuit Breaker Active*
+
+          The arbitrage bot circuit breaker has been triggered.
+          Trading is paused until the cooldown period expires.
+
+          • Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+          Check /status via Telegram bot or dashboard for details."
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="$MESSAGE" \
+            -d parse_mode="Markdown" \
+            --connect-timeout 10 --max-time 30 || true
+
+  force-rollback:
+    name: Force Rollback
+    runs-on: ubuntu-latest
+    if: github.event.inputs.force_rollback == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rollback to previous image
+        run: |
+          echo "⚠️ Force rollback requested"
+          echo "Rollback procedure:"
+          echo "  1. docker-compose stop arb-bot"
+          echo "  2. docker tag arb-bot:previous arb-bot:latest"
+          echo "  3. docker-compose up -d arb-bot"
+          echo ""
+          echo "For remote deployments, SSH into the server and run the above commands."
+          echo "Or trigger the deploy-production workflow with the previous commit SHA."
+
+      - name: Send Telegram notification
+        if: env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
+        run: |
+          MESSAGE="🔄 *Rollback Initiated*
+
+          A force rollback was triggered via GitHub Actions.
+          Verify bot health after rollback completes.
+
+          • Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          • Triggered by: ${{ github.actor }}"
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="$MESSAGE" \
+            -d parse_mode="Markdown" \
+            --connect-timeout 10 --max-time 30 || true
