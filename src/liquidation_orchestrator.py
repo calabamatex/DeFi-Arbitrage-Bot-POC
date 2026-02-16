@@ -15,6 +15,8 @@ from web3 import Web3
 from eth_account import Account
 from dotenv import load_dotenv
 
+from src.utils.errors import classify_web3_exception
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -138,8 +140,12 @@ class LiquidationOrchestrator:
             logger.info(f"Contract owner: {owner}")
             if owner.lower() != self.address.lower():
                 logger.warning(f"Executor {self.address} is not contract owner {owner}")
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.error(f"RPC failure ({type(classified).__name__}): {e}")
         except Exception as e:
-            logger.error(f"Failed to verify contract: {e}")
+            classified = classify_web3_exception(e)
+            logger.error(f"{type(classified).__name__}: Failed to verify contract: {e}", extra={"retryable": classified.retryable})
 
     def select_adapter(self, collateral_asset: str, debt_asset: str) -> str:
         """
@@ -204,8 +210,13 @@ class LiquidationOrchestrator:
         try:
             gas_estimate = self.web3.eth.estimate_gas(transaction)
             return int(gas_estimate * 1.2)
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.warning(f"RPC failure during gas estimation ({type(classified).__name__}): {e}, using default")
+            return 800000
         except Exception as e:
-            logger.warning(f"Gas estimation failed: {e}, using default")
+            classified = classify_web3_exception(e)
+            logger.warning(f"{type(classified).__name__}: Gas estimation failed: {e}, using default", extra={"retryable": classified.retryable})
             return 800000
 
     def execute_liquidation(
@@ -278,8 +289,14 @@ class LiquidationOrchestrator:
                     'maxPriorityFeePerGas': transaction['maxPriorityFeePerGas'],
                 })
                 logger.info("  Simulation passed")
+            except (TimeoutError, ConnectionError) as sim_err:
+                classified = classify_web3_exception(sim_err)
+                logger.error(f"  Simulation RPC failure ({type(classified).__name__}): {sim_err}")
+                result['error'] = f"Simulation RPC failure: {sim_err}"
+                return result
             except Exception as sim_err:
-                logger.error(f"  Simulation FAILED: {sim_err}")
+                classified = classify_web3_exception(sim_err)
+                logger.error(f"  Simulation FAILED ({type(classified).__name__}): {sim_err}", extra={"retryable": classified.retryable})
                 result['error'] = f"Simulation failed: {sim_err}"
                 return result
 
@@ -314,8 +331,13 @@ class LiquidationOrchestrator:
                     result['error'] = "Transaction reverted"
                     result['tx_hash'] = receipt['transactionHash'].hex()
 
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.error(f"  RPC failure ({type(classified).__name__}): {e}")
+            result['error'] = str(e)
         except Exception as e:
-            logger.error(f"  Execution failed: {e}")
+            classified = classify_web3_exception(e)
+            logger.error(f"  Execution failed ({type(classified).__name__}): {e}", extra={"retryable": classified.retryable})
             result['error'] = str(e)
 
         execution_time = time.time() - start_time
@@ -361,6 +383,11 @@ class LiquidationOrchestrator:
                 'paused': paused,
                 'contract': self.liquidator_address,
             }
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.error(f"RPC failure getting contract stats ({type(classified).__name__}): {e}")
+            return {}
         except Exception as e:
-            logger.error(f"Failed to get contract stats: {e}")
+            classified = classify_web3_exception(e)
+            logger.error(f"{type(classified).__name__}: Failed to get contract stats: {e}", extra={"retryable": classified.retryable})
             return {}

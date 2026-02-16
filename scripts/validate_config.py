@@ -149,10 +149,45 @@ def main():
     if mode == "mainnet" and not dry_run:
         warn("LIVE EXECUTION", "DRY_RUN=false on mainnet — ensure this is intentional")
 
+    # 7. Security Validation
+    print("\n[7] Security Validation")
+    has_critical_security = False
+    try:
+        issues = Config.validate_security()
+        if not issues:
+            check("Security validation", True, "No issues found")
+            passed += 1
+        else:
+            for sev, msg in issues:
+                if sev == "CRITICAL":
+                    check(f"[{sev}] {msg}", False)
+                    failed += 1
+                    has_critical_security = True
+                elif sev == "WARNING":
+                    warn(f"[{sev}] {msg}")
+                else:
+                    print(f"  {Y}INFO{N} {msg}")
+    except SystemExit:
+        # validate_security() raises SystemExit on mainnet with CRITICAL issues
+        check("Security validation", False, "CRITICAL issues found — blocked by fail-fast")
+        failed += 1
+        has_critical_security = True
+
+    # 8. DEV_MODE Status
+    print("\n[8] DEV_MODE Status")
+    dev_mode = os.getenv("DEV_MODE", "false").lower() == "true"
+    if dev_mode:
+        warn("DEV_MODE=true", "Security fail-fast is bypassed — do NOT use in production")
+    else:
+        check("DEV_MODE", True, "Disabled (production-safe)")
+        passed += 1
+
     # Summary
     print(f"\n{'=' * 50}")
     total = passed + failed
     print(f"Results: {G}{passed}{N} passed, {R}{failed}{N} failed (of {total} checks)")
+    if has_critical_security:
+        print(f"{R}CRITICAL security issues detected — resolve before deployment{N}")
     print(f"{'=' * 50}\n")
 
     sys.exit(1 if failed > 0 else 0)

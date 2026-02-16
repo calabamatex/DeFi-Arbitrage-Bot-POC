@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 try:
     from prometheus_client import (
@@ -164,7 +165,9 @@ class HealthHandler(BaseHTTPRequestHandler):
         """Check Bearer auth token. Returns True if authorized."""
         if not _AUTH_TOKEN:
             return True
-        if self.path in _PUBLIC_PATHS:
+        # Strip query string before comparing against public paths
+        clean_path = urlparse(self.path).path
+        if clean_path in _PUBLIC_PATHS:
             return True
         auth_header = self.headers.get("Authorization", "")
         if auth_header == f"Bearer {_AUTH_TOKEN}":
@@ -181,20 +184,23 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/health":
+        # Strip query string so /health?foo=bar still matches /health
+        path = urlparse(self.path).path
+
+        if path == "/health":
             self._handle_health()
-        elif self.path == "/healthz":
+        elif path == "/healthz":
             self._handle_liveness()
-        elif self.path == "/readyz":
+        elif path == "/readyz":
             self._handle_readiness()
-        elif self.path == "/metrics":
+        elif path == "/metrics":
             if self._check_auth():
                 self._handle_metrics()
-        elif self.path == "/api/status":
+        elif path == "/api/status":
             if self._check_auth():
                 self._handle_status()
         else:
-            self.send_error(404)
+            self._send_json(404, {"error": "not found"})
 
         logger.debug("%s %s -> response sent", self.command, self.path)
 

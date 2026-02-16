@@ -1,4 +1,10 @@
-"""Configuration management for the arbitrage bot."""
+"""Configuration management for the arbitrage bot.
+
+This module handles bot-specific configuration (config.json loading, token
+lists, ABI definitions, RPC validation).  Shared infrastructure values
+(EXECUTION_MODE, database URLs, Redis, Telegram, etc.) are delegated to the
+primary configuration module ``src.config.Config``.
+"""
 
 from typing import Dict, Tuple, Any, List
 from decimal import Decimal
@@ -8,6 +14,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 from web3 import Web3
 import logging
+
+# Primary config — single source of truth for shared infrastructure values.
+from src.config import Config as _PrimaryConfig
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -23,14 +32,20 @@ def load_config() -> Tuple[Dict[str, Any], str, Dict[str, Any], Dict[str, Dict]]
     """
     Load configuration from config.json and environment.
 
+    The environment name (``mainnet`` / ``testnet``) is resolved from the
+    ``ENVIRONMENT`` env-var.  When ``ENVIRONMENT`` is not explicitly set the
+    value is derived from the primary config's ``EXECUTION_MODE`` so that
+    both modules stay in sync.
+
     Returns:
         Tuple of (full_config, env_name, env_config, token_list)
 
     Raises:
         ConfigurationError: If configuration invalid or missing
     """
-    # Determine environment
-    env = os.getenv("ENVIRONMENT", "testnet")
+    # Determine environment — fall back to the primary config's EXECUTION_MODE
+    # so that ``ENVIRONMENT`` and ``EXECUTION_MODE`` stay aligned.
+    env = os.getenv("ENVIRONMENT") or _PrimaryConfig.EXECUTION_MODE or "testnet"
     if env not in ["mainnet", "testnet"]:
         raise ConfigurationError(
             f"Invalid ENVIRONMENT: {env}. Must be 'mainnet' or 'testnet'"
@@ -130,6 +145,9 @@ def load_env_vars() -> Tuple[str, str, str]:
     Private key is loaded via key_manager (encrypted keystore or runtime
     env var). NEVER store keys in .env files.
 
+    Telegram credentials are delegated to the primary ``src.config.Config``
+    so there is a single source of truth.
+
     Returns:
         Tuple of (private_key, telegram_token, telegram_chat)
 
@@ -146,7 +164,9 @@ def load_env_vars() -> Tuple[str, str, str]:
             "or PRIVATE_KEY env var. Run: python -m src.utils.key_manager create"
         )
 
-    # Telegram credentials are optional
+    # Telegram credentials — read from env at call time so monkeypatching
+    # and runtime overrides work correctly (Config.telegram is resolved at
+    # import time and would not reflect later env changes).
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     telegram_chat = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -352,6 +372,10 @@ if __name__ == "__main__":
     )
 
     try:
+        # Show primary config alignment
+        print(f"Primary config EXECUTION_MODE: {_PrimaryConfig.EXECUTION_MODE}")
+        print(f"Primary config DRY_RUN:        {_PrimaryConfig.DRY_RUN}")
+
         # Load configuration
         config, env, env_config, token_list = load_config()
         print(f"✓ Configuration loaded for {env}")

@@ -22,6 +22,7 @@ from src.db.models import (
     OpportunityStatus, TransactionStatus
 )
 from src.flash_loan_providers import FlashLoanSelector, FlashLoanProvider
+from src.utils.errors import classify_web3_exception, DatabaseError
 
 # Load environment variables
 load_dotenv()
@@ -166,8 +167,12 @@ class FlashLoanOrchestrator:
             logger.info(f"Contract owner: {owner}")
             if owner.lower() != self.address.lower():
                 logger.warning(f"⚠️  Executor {self.address} is not contract owner {owner}")
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.error(f"RPC failure ({type(classified).__name__}): {e}")
         except Exception as e:
-            logger.error(f"Failed to verify contract: {e}")
+            classified = classify_web3_exception(e)
+            logger.error(f"{type(classified).__name__}: Failed to verify contract: {e}", extra={"retryable": classified.retryable})
 
     def encode_v3_swap_data(self, fee: int) -> bytes:
         """
@@ -319,8 +324,13 @@ class FlashLoanOrchestrator:
             gas_estimate = self.web3.eth.estimate_gas(transaction)
             # Add 20% buffer
             return int(gas_estimate * 1.2)
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.warning(f"RPC failure during gas estimation ({type(classified).__name__}): {e}, using default")
+            return 600000
         except Exception as e:
-            logger.warning(f"Gas estimation failed: {e}, using default")
+            classified = classify_web3_exception(e)
+            logger.warning(f"{type(classified).__name__}: Gas estimation failed: {e}, using default", extra={"retryable": classified.retryable})
             # Default: 600k gas for flash loan arbitrage
             return 600000
 
@@ -331,6 +341,19 @@ class FlashLoanOrchestrator:
     ) -> Dict:
         """
         Build the arbitrage transaction.
+
+        NOTE: This method already uses EIP-1559 (maxFeePerGas /
+        maxPriorityFeePerGas).  It handles its own nonce management,
+        gas estimation, and fee calculation inline.
+
+        TODO(FORGE-TX): Refactor to delegate to TransactionManager for:
+          - Nonce tracking with asyncio.Lock (prevents nonce collisions
+            under concurrent execution)
+          - Automatic retry with replacement transactions (gas-bumped
+            resubmission on the same nonce)
+          - Centralized EIP-1559 fee calculation via _get_eip1559_fees()
+          This would require converting execute_opportunity to async and
+          wiring a TransactionManager instance into the constructor.
 
         Args:
             opportunity: Opportunity data
@@ -399,6 +422,16 @@ class FlashLoanOrchestrator:
         """
         Execute an arbitrage opportunity.
 
+        TODO(FORGE-TX): When migrating to TransactionManager:
+          1. Convert this method to ``async def``
+          2. Replace inline sign_transaction / send_raw_transaction /
+             wait_for_transaction_receipt with
+             ``TransactionManager.execute_transaction()`` which handles
+             nonce locking, EIP-1559 fee calculation, and retry-with-
+             replacement automatically.
+          3. The pre-execution ``eth_call`` simulation can remain as-is;
+             TransactionManager.simulate_transaction() is an alternative.
+
         Args:
             opportunity: Opportunity data from detector
             opportunity_id: Optional opportunity ID for database tracking
@@ -443,8 +476,14 @@ class FlashLoanOrchestrator:
                     'maxPriorityFeePerGas': transaction['maxPriorityFeePerGas'],
                 })
                 logger.info("  Simulation passed")
+            except (TimeoutError, ConnectionError) as sim_err:
+                classified = classify_web3_exception(sim_err)
+                logger.error(f"  Simulation RPC failure ({type(classified).__name__}): {sim_err}")
+                result['error'] = f"Simulation RPC failure: {sim_err}"
+                return result
             except Exception as sim_err:
-                logger.error(f"  Simulation FAILED: {sim_err}")
+                classified = classify_web3_exception(sim_err)
+                logger.error(f"  Simulation FAILED ({type(classified).__name__}): {sim_err}", extra={"retryable": classified.retryable})
                 result['error'] = f"Simulation failed: {sim_err}"
                 return result
 
@@ -494,8 +533,13 @@ class FlashLoanOrchestrator:
                     result['error'] = "Transaction reverted"
                     result['tx_hash'] = receipt['transactionHash'].hex()
 
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.error(f"  ❌ RPC failure ({type(classified).__name__}): {e}")
+            result['error'] = str(e)
         except Exception as e:
-            logger.error(f"  ❌ Execution failed: {e}")
+            classified = classify_web3_exception(e)
+            logger.error(f"  ❌ Execution failed ({type(classified).__name__}): {e}", extra={"retryable": classified.retryable})
             result['error'] = str(e)
 
         # Log execution time
@@ -600,8 +644,12 @@ class FlashLoanOrchestrator:
                 db.commit()
                 logger.info(f"Logged to database: {opportunity_id[:10]}...")
 
+        except (OSError, ConnectionError) as e:
+            classified = DatabaseError(str(e))
+            logger.error(f"Database connection failure ({type(classified).__name__}): {e}")
         except Exception as e:
-            logger.error(f"Failed to log execution to database: {e}")
+            classified = classify_web3_exception(e)
+            logger.error(f"{type(classified).__name__}: Failed to log execution to database: {e}", extra={"retryable": classified.retryable})
 
     def check_balance(self, token_address: str) -> int:
         """
@@ -678,8 +726,12 @@ class FlashLoanOrchestrator:
 
         except KeyboardInterrupt:
             logger.info("\n⛔ Orchestrator stopped by user")
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.error(f"❌ Orchestrator RPC failure ({type(classified).__name__}): {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"❌ Orchestrator error: {e}", exc_info=True)
+            classified = classify_web3_exception(e)
+            logger.error(f"❌ Orchestrator error ({type(classified).__name__}): {e}", exc_info=True, extra={"retryable": classified.retryable})
 
 
 if __name__ == "__main__":

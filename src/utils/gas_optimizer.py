@@ -98,6 +98,13 @@ class GasOptimizer:
         """
         Estimate total gas cost for a transaction.
 
+        Uses the legacy gas price adjusted for urgency.  This provides a
+        conservative, single-source estimate that tracks real-time network
+        conditions (including gas spikes) without requiring the caller to
+        reason about EIP-1559 base-fee vs. priority-fee decomposition.
+
+        For an EIP-1559-aware estimate, use ``estimate_gas_cost_eip1559``.
+
         Args:
             gas_limit: Gas limit for transaction
             urgency: Transaction urgency
@@ -111,6 +118,48 @@ class GasOptimizer:
 
         logger.debug(
             f"Estimated gas cost: {gas_limit} gas * {gas_price} wei = {cost_eth:.6f} ETH"
+        )
+
+        return cost_eth
+
+    def estimate_gas_cost_eip1559(
+        self, gas_limit: int, urgency: str = "normal"
+    ) -> Decimal:
+        """
+        Estimate gas cost using EIP-1559 fee parameters.
+
+        Computes the effective gas price as
+        ``min(maxFeePerGas, baseFeePerGas + maxPriorityFeePerGas)`` which
+        mirrors how the protocol charges for type-2 transactions.  Falls
+        back to the legacy estimate when baseFeePerGas is unavailable.
+
+        Args:
+            gas_limit: Gas limit for transaction
+            urgency: Transaction urgency
+
+        Returns:
+            Estimated cost in native token (ETH/MATIC)
+        """
+        try:
+            latest = self.web3.eth.get_block("latest")
+            base_fee = latest.get("baseFeePerGas")
+            if base_fee is not None:
+                eip_params = self.use_eip1559(urgency)
+                effective_price = min(
+                    eip_params["maxFeePerGas"],
+                    base_fee + eip_params["maxPriorityFeePerGas"],
+                )
+            else:
+                effective_price = self.get_optimal_gas_price(urgency)
+        except Exception:
+            effective_price = self.get_optimal_gas_price(urgency)
+
+        cost_wei = gas_limit * effective_price
+        cost_eth = Decimal(cost_wei) / Decimal(10**18)
+
+        logger.debug(
+            f"Estimated EIP-1559 gas cost: {gas_limit} gas * "
+            f"{effective_price} wei = {cost_eth:.6f} ETH"
         )
 
         return cost_eth

@@ -7,12 +7,14 @@
 #   POSTGRES_PASSWORD   — Database password (required, no default)
 #   REDIS_PASSWORD      — Redis AUTH password (required, no default)
 #   PGADMIN_PASSWORD    — PgAdmin login password (required when using tools profile)
+#   GRAFANA_ADMIN_PASSWORD — Grafana login password (required when using monitoring profile)
+#   REDIS_COMMANDER_PASSWORD — Redis Commander password (required when using tools profile)
 #   HEALTH_AUTH_TOKEN   — Bearer token for health endpoints (recommended)
 #
 # For local development ONLY, set DEV_MODE=true to relax some constraints.
 # NEVER run with DEV_MODE=true in production.
 #
-# Image versions pinned 2025-02-16 — review monthly
+# Image versions pinned 2026-02-16 — review monthly
 # =============================================================================
 
 version: '3.8'
@@ -42,15 +44,17 @@ services:
       - arbitrage_network
 
   redis:
-    image: redis:7.4-alpine
+    image: redis:7.4.2-alpine
     container_name: arbitrage_redis
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env or environment}
     ports:
       - "${REDIS_HOST_BIND:-127.0.0.1}:6379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env or environment}
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--raw", "incr", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -69,7 +73,7 @@ services:
       HEALTH_AUTH_TOKEN: ${HEALTH_AUTH_TOKEN:-}
       DEV_MODE: ${DEV_MODE:-false}
     ports:
-      - "8080:8080"
+      - "${ARB_BOT_HOST_BIND:-0.0.0.0}:${ARB_BOT_PORT:-8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -91,7 +95,7 @@ services:
       HEALTH_AUTH_TOKEN: ${HEALTH_AUTH_TOKEN:-}
       DEV_MODE: ${DEV_MODE:-false}
     ports:
-      - "8082:8080"
+      - "${LIQ_BOT_HOST_BIND:-0.0.0.0}:${LIQ_BOT_PORT:-8082}:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -114,7 +118,7 @@ services:
       BOT_API_URL: http://arb-bot:8080
       HEALTH_AUTH_TOKEN: ${HEALTH_AUTH_TOKEN:-}
     ports:
-      - "8000:8000"
+      - "${DASHBOARD_API_HOST_BIND:-0.0.0.0}:${DASHBOARD_API_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -134,10 +138,10 @@ services:
     container_name: dashboard_web
     command: ["node", "dashboard/web/server.js"]
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+      NEXT_PUBLIC_API_URL: http://localhost:${DASHBOARD_API_PORT:-8000}/api/v1
       PORT: "3000"
     ports:
-      - "3000:3000"
+      - "${DASHBOARD_WEB_HOST_BIND:-0.0.0.0}:${DASHBOARD_WEB_PORT:-3000}:3000"
     depends_on:
       - dashboard-api
     restart: unless-stopped

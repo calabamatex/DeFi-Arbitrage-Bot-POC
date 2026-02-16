@@ -12,6 +12,8 @@ from typing import Dict, List, Optional, Tuple
 from web3 import Web3
 from dotenv import load_dotenv
 
+from src.utils.errors import classify_web3_exception
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -144,8 +146,13 @@ class LiquidationDetector:
                 "ltv": result[4],
                 "healthFactor": result[5],
             }
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.warning(f"RPC failure getting account data for {user[:10]} ({type(classified).__name__}): {e}")
+            return None
         except Exception as e:
-            logger.warning(f"Failed to get account data for {user[:10]}: {e}")
+            classified = classify_web3_exception(e)
+            logger.warning(f"{type(classified).__name__}: Failed to get account data for {user[:10]}: {e}", extra={"retryable": classified.retryable})
             return None
 
     def is_liquidatable(self, user: str) -> Tuple[bool, Optional[int]]:
@@ -178,8 +185,13 @@ class LiquidationDetector:
                 "borrowingEnabled": result[6],
                 "isActive": result[8],
             }
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.warning(f"RPC failure getting reserve config for {asset[:10]} ({type(classified).__name__}): {e}")
+            return None
         except Exception as e:
-            logger.warning(f"Failed to get reserve config for {asset[:10]}: {e}")
+            classified = classify_web3_exception(e)
+            logger.warning(f"{type(classified).__name__}: Failed to get reserve config for {asset[:10]}: {e}", extra={"retryable": classified.retryable})
             return None
 
     def get_user_reserve_data(self, asset: str, user: str) -> Optional[Dict]:
@@ -195,8 +207,13 @@ class LiquidationDetector:
                 "variableDebt": result[2],
                 "usageAsCollateralEnabled": result[8],
             }
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.debug(f"RPC failure getting user reserve data ({type(classified).__name__}): {e}")
+            return None
         except Exception as e:
-            logger.debug(f"Failed to get user reserve data: {e}")
+            classified = classify_web3_exception(e)
+            logger.debug(f"{type(classified).__name__}: Failed to get user reserve data: {e}", extra={"retryable": classified.retryable})
             return None
 
     def calculate_liquidation_profit(
@@ -279,8 +296,13 @@ class LiquidationDetector:
                 f"Found {len(borrowers)} borrowers in blocks {from_block}-{to_block}"
             )
             return list(borrowers)
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.error(f"RPC failure scanning borrow events ({type(classified).__name__}): {e}")
+            return []
         except Exception as e:
-            logger.error(f"Failed to scan borrow events: {e}")
+            classified = classify_web3_exception(e)
+            logger.error(f"{type(classified).__name__}: Failed to scan borrow events: {e}", extra={"retryable": classified.retryable})
             return []
 
     def scan_for_liquidations(

@@ -1,10 +1,12 @@
 """
 Transaction Manager - Handles all blockchain transaction operations.
+
+Supports both EIP-1559 type-2 transactions (preferred) and legacy gas pricing.
 """
 
 import asyncio
 from decimal import Decimal
-from typing import Tuple, Optional, Any, Set, cast
+from typing import Tuple, Optional, Any, Set, Dict, cast
 from web3 import Web3
 from web3.types import TxParams, TxReceipt, HexStr
 from eth_account import Account
@@ -18,6 +20,10 @@ class TransactionManager:
     """
     Manages blockchain transactions with proper nonce handling,
     signing, sending, and monitoring.
+
+    Supports EIP-1559 type-2 transactions with maxFeePerGas and
+    maxPriorityFeePerGas, falling back to legacy gasPrice when
+    the network does not support EIP-1559.
     """
 
     def __init__(self, web3: Web3, account: str, private_key: str):
@@ -36,6 +42,49 @@ class TransactionManager:
         self._pending_nonces: Set[int] = set()
 
         logger.info(f"TransactionManager initialized for account {self.account}")
+
+    def _supports_eip1559(self) -> bool:
+        """
+        Check whether the connected network supports EIP-1559.
+
+        Returns:
+            True if baseFeePerGas is present in the latest block.
+        """
+        try:
+            latest = self.web3.eth.get_block("latest")
+            return "baseFeePerGas" in latest and latest["baseFeePerGas"] is not None
+        except Exception:
+            return False
+
+    def _get_eip1559_fees(
+        self, urgency: str = "normal"
+    ) -> Dict[str, int]:
+        """
+        Calculate EIP-1559 fee parameters from the latest block.
+
+        Args:
+            urgency: "low", "normal", or "high"
+
+        Returns:
+            Dict with maxFeePerGas and maxPriorityFeePerGas in wei.
+        """
+        latest = self.web3.eth.get_block("latest")
+        base_fee = latest.get("baseFeePerGas", self.web3.eth.gas_price)
+
+        priority_map = {
+            "low": self.web3.to_wei(1, "gwei"),
+            "normal": self.web3.to_wei(2, "gwei"),
+            "high": self.web3.to_wei(3, "gwei"),
+        }
+        priority_fee = priority_map.get(urgency, self.web3.to_wei(2, "gwei"))
+
+        # Allow for one full base-fee doubling: 2 * base + priority
+        max_fee = base_fee * 2 + priority_fee
+
+        return {
+            "maxFeePerGas": max_fee,
+            "maxPriorityFeePerGas": priority_fee,
+        }
 
     async def get_next_nonce(self) -> int:
         """
@@ -82,11 +131,17 @@ class TransactionManager:
         """
         Build transaction dictionary.
 
+        When *gas_price* is explicitly provided, a legacy (type-0) transaction
+        is built for backward compatibility.  When it is ``None`` (the default),
+        the manager checks whether the network supports EIP-1559 and, if so,
+        builds a type-2 transaction with ``maxFeePerGas`` / ``maxPriorityFeePerGas``.
+        On non-EIP-1559 networks it falls back to the legacy ``gasPrice`` field.
+
         Args:
             contract_function: Contract function to call
             gas_limit: Gas limit for transaction
             value: Value to send (in wei)
-            gas_price: Gas price (if None, uses current network price)
+            gas_price: Legacy gas price override. When set, forces legacy tx.
 
         Returns:
             Transaction dictionary
@@ -94,30 +149,48 @@ class TransactionManager:
         # Get nonce
         nonce = await self.get_next_nonce()
 
-        # Get gas price if not provided
-        if gas_price is None:
-            gas_price = self.web3.eth.gas_price
-
         # Get chain ID
         chain_id = self.web3.eth.chain_id
 
+        # Build gas parameters
+        if gas_price is not None:
+            # Caller explicitly requested legacy gas pricing
+            gas_params: dict = {"gasPrice": gas_price}
+        else:
+            # Try EIP-1559; fall back to legacy
+            try:
+                if self._supports_eip1559():
+                    gas_params = self._get_eip1559_fees()
+                else:
+                    gas_params = {"gasPrice": self.web3.eth.gas_price}
+            except Exception:
+                gas_params = {"gasPrice": self.web3.eth.gas_price}
+
+        # Assemble base tx fields
+        tx_fields: dict = {
+            "from": self.account,
+            "nonce": nonce,
+            "gas": gas_limit,
+            "value": value,
+            "chainId": chain_id,
+        }
+        tx_fields.update(gas_params)
+
         # Build transaction
         try:
-            transaction = contract_function.build_transaction(
-                {
-                    "from": self.account,
-                    "nonce": nonce,
-                    "gas": gas_limit,
-                    "gasPrice": gas_price,
-                    "value": value,
-                    "chainId": chain_id,
-                }
-            )
+            transaction = contract_function.build_transaction(tx_fields)
 
-            logger.debug(
-                f"Built transaction: nonce={nonce}, gas={gas_limit}, "
-                f"gasPrice={gas_price}"
-            )
+            if "maxFeePerGas" in gas_params:
+                logger.debug(
+                    f"Built EIP-1559 tx: nonce={nonce}, gas={gas_limit}, "
+                    f"maxFee={gas_params['maxFeePerGas']}, "
+                    f"priority={gas_params['maxPriorityFeePerGas']}"
+                )
+            else:
+                logger.debug(
+                    f"Built legacy tx: nonce={nonce}, gas={gas_limit}, "
+                    f"gasPrice={gas_params.get('gasPrice')}"
+                )
 
             return transaction
 
@@ -215,6 +288,11 @@ class TransactionManager:
         """
         Execute transaction with retry logic.
 
+        On the first attempt, a new nonce is allocated via ``build_transaction``.
+        On subsequent retries the same nonce is reused with a gas-bumped
+        replacement transaction so that stuck transactions are properly
+        superseded instead of creating nonce gaps.
+
         Args:
             contract_function: Contract function to execute
             gas_limit: Gas limit
@@ -234,12 +312,21 @@ class TransactionManager:
                     f"Executing transaction (attempt {attempt + 1}/{max_retries})"
                 )
 
-                # Build transaction
-                transaction = await self.build_transaction(
-                    contract_function, gas_limit, value
-                )
-
-                nonce = transaction["nonce"]
+                if attempt == 0 or nonce is None:
+                    # First attempt: allocate a fresh nonce
+                    transaction = await self.build_transaction(
+                        contract_function, gas_limit, value
+                    )
+                    nonce = transaction["nonce"]
+                else:
+                    # Retry: reuse the same nonce with bumped gas
+                    transaction = await self.build_replacement_transaction(
+                        contract_function,
+                        gas_limit,
+                        original_nonce=nonce,
+                        value=value,
+                        gas_bump_pct=15 * attempt,  # 15%, 30%, ...
+                    )
 
                 # Send transaction
                 tx_hash = await self.sign_and_send(transaction)
@@ -261,8 +348,8 @@ class TransactionManager:
                 last_error = str(e)
                 logger.error(f"Transaction attempt {attempt + 1} failed: {e}")
 
-                # Release nonce if we have it
-                if nonce is not None:
+                # Release nonce if we have it and won't retry
+                if nonce is not None and attempt >= max_retries - 1:
                     self.release_nonce(nonce)
 
                 # Wait before retry
@@ -270,7 +357,9 @@ class TransactionManager:
                     logger.info(f"Retrying in {retry_delay} seconds...")
                     await asyncio.sleep(retry_delay)
 
-        # All retries failed
+        # All retries failed — ensure nonce is released
+        if nonce is not None:
+            self.release_nonce(nonce)
         return False, f"All retries failed. Last error: {last_error}"
 
     async def simulate_transaction(
@@ -320,6 +409,68 @@ class TransactionManager:
             logger.error(f"Gas estimation failed: {e}")
             # Return a conservative default
             return 300000
+
+    async def build_replacement_transaction(
+        self,
+        contract_function: Any,
+        gas_limit: int,
+        original_nonce: int,
+        value: int = 0,
+        gas_bump_pct: int = 15,
+    ) -> dict:
+        """
+        Build a replacement (speed-up) transaction reusing an existing nonce.
+
+        EIP-1559 nodes require at least a 10% bump on both maxFeePerGas and
+        maxPriorityFeePerGas to accept a replacement. This method applies
+        *gas_bump_pct* (default 15%) on top of current network fees to ensure
+        acceptance.
+
+        Args:
+            contract_function: Contract function to call
+            gas_limit: Gas limit for transaction
+            original_nonce: Nonce of the stuck transaction to replace
+            value: Value to send (in wei)
+            gas_bump_pct: Percentage to bump gas fees (default 15)
+
+        Returns:
+            Transaction dictionary with the same nonce and higher fees
+        """
+        chain_id = self.web3.eth.chain_id
+        bump = 1 + gas_bump_pct / 100
+
+        try:
+            if self._supports_eip1559():
+                fees = self._get_eip1559_fees(urgency="high")
+                gas_params: dict = {
+                    "maxFeePerGas": int(fees["maxFeePerGas"] * bump),
+                    "maxPriorityFeePerGas": int(fees["maxPriorityFeePerGas"] * bump),
+                }
+            else:
+                gas_params = {
+                    "gasPrice": int(self.web3.eth.gas_price * bump),
+                }
+
+            tx_fields: dict = {
+                "from": self.account,
+                "nonce": original_nonce,
+                "gas": gas_limit,
+                "value": value,
+                "chainId": chain_id,
+            }
+            tx_fields.update(gas_params)
+
+            transaction = contract_function.build_transaction(tx_fields)
+
+            logger.info(
+                f"Built replacement tx for nonce {original_nonce} "
+                f"(+{gas_bump_pct}% gas bump)"
+            )
+            return transaction
+
+        except Exception as e:
+            logger.error(f"Error building replacement transaction: {e}")
+            raise
 
     def get_pending_nonce_count(self) -> int:
         """

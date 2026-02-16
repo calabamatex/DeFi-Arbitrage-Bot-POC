@@ -66,7 +66,8 @@ This runs:
 ## 5. Deploy Contracts to Testnet
 
 ```bash
-make deploy-testnet CHAIN=polygon_amoy
+make deploy-testnet
+# When prompted, enter: polygon_amoy
 ```
 
 Copy the deployed addresses into `.env`:
@@ -80,16 +81,17 @@ UNISWAP_V2_ADAPTER_ADDRESS=0x...
 Repeat for Arbitrum Sepolia if desired:
 
 ```bash
-make deploy-testnet CHAIN=arbitrum_sepolia
+make deploy-testnet
+# When prompted, enter: arbitrum_sepolia
 ```
 
 ## 6. Run in Dry-Run Mode
 
 ```bash
-make run-bot DRY_RUN=true
+make run-bot
 ```
 
-The bot scans for arbitrage opportunities but simulates (does not send) transactions.
+With the default `DRY_RUN=true` in `.env`, the bot scans for arbitrage opportunities but simulates (does not send) transactions.
 
 ## 7. Verify
 
@@ -97,13 +99,13 @@ The bot scans for arbitrage opportunities but simulates (does not send) transact
 # Health check
 make status
 
-# Smoke test
+# Smoke test (will prompt for chain: polygon_amoy or arbitrum_sepolia)
 make smoke-test
 ```
 
 Expected output:
-- `make status` → `{"status": "ok"}` (200)
-- `make smoke-test` → all checks PASS
+- `make status` returns `{"status": "ok"}` (200)
+- `make smoke-test` returns all checks PASS
 
 ## 8. Enable Live Testnet Execution
 
@@ -179,6 +181,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 | `make docker-build` | Build bot Docker image |
 | `make docker-up` | Start all containers |
 | `make docker-down` | Stop all containers |
+| `make deploy-testnet` | Deploy contracts to testnet (prompts for chain) |
 | `make migrate` | Run database migrations |
 | `make validate` | Run config validation |
 | `make smoke-test` | Run testnet smoke test |

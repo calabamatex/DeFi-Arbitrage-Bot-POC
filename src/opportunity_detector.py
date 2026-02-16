@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from src.db.database import get_db
 from src.db.models import Opportunity, OpportunityStatus, Chain, DEX, Token
 from src.utils.token_registry import TokenRegistry
+from src.utils.errors import classify_web3_exception, DatabaseError
 
 # Load environment variables
 load_dotenv()
@@ -252,8 +253,13 @@ class OpportunityDetector:
                 token_in, token_out, amount_in
             ).call()
             return amount_out
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.debug(f"Curve quote RPC failure ({type(classified).__name__}) for {token_in[:6]}→{token_out[:6]}: {e}")
+            return None
         except Exception as e:
-            logger.debug(f"Curve quote failed for {token_in[:6]}→{token_out[:6]}: {e}")
+            classified = classify_web3_exception(e)
+            logger.debug(f"Curve quote failed ({type(classified).__name__}) for {token_in[:6]}→{token_out[:6]}: {e}", extra={"retryable": classified.retryable})
             return None
 
     def get_v3_quote(
@@ -286,8 +292,13 @@ class OpportunityDetector:
             result = self.v3_quoter_contract.functions.quoteExactInputSingle(params).call()
             amount_out = result[0]  # First element is amountOut
             return amount_out
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.warning(f"V3 quote RPC failure ({type(classified).__name__}) for {token_in[:6]}→{token_out[:6]} fee={fee}: {e}")
+            return None
         except Exception as e:
-            logger.warning(f"V3 quote failed for {token_in[:6]}→{token_out[:6]} fee={fee}: {e}")
+            classified = classify_web3_exception(e)
+            logger.warning(f"V3 quote failed ({type(classified).__name__}) for {token_in[:6]}→{token_out[:6]} fee={fee}: {e}", extra={"retryable": classified.retryable})
             return None
 
     def get_v2_quote(
@@ -314,8 +325,13 @@ class OpportunityDetector:
                 path
             ).call()
             return amounts[-1]  # Last element is output amount
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.warning(f"V2 quote RPC failure ({type(classified).__name__}) for {token_in[:6]}→{token_out[:6]}: {e}")
+            return None
         except Exception as e:
-            logger.warning(f"V2 quote failed for {token_in[:6]}→{token_out[:6]}: {e}")
+            classified = classify_web3_exception(e)
+            logger.warning(f"V2 quote failed ({type(classified).__name__}) for {token_in[:6]}→{token_out[:6]}: {e}", extra={"retryable": classified.retryable})
             return None
 
     def find_best_v3_fee(
@@ -587,8 +603,13 @@ class OpportunityDetector:
 
         try:
             gas_price = self.web3.eth.gas_price
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.warning(f"RPC failure fetching gas price ({type(classified).__name__}): {e}")
+            gas_price = self.web3.to_wei(self.max_gas_price_gwei, 'gwei')
         except Exception as e:
-            logger.warning(f"Failed to get gas price: {e}")
+            classified = classify_web3_exception(e)
+            logger.warning(f"{type(classified).__name__}: Failed to get gas price: {e}", extra={"retryable": classified.retryable})
             gas_price = self.web3.to_wei(self.max_gas_price_gwei, 'gwei')
 
         return estimated_gas * gas_price
@@ -796,8 +817,13 @@ class OpportunityDetector:
 
                 return opp_id
 
+        except (OSError, ConnectionError) as e:
+            classified = DatabaseError(str(e))
+            logger.error(f"Database connection failure ({type(classified).__name__}): {e}")
+            return None
         except Exception as e:
-            logger.error(f"Failed to log opportunity: {e}")
+            classified = classify_web3_exception(e)
+            logger.error(f"{type(classified).__name__}: Failed to log opportunity: {e}", extra={"retryable": classified.retryable})
             return None
 
     def scan_opportunities(self) -> List[Dict]:
@@ -852,8 +878,12 @@ class OpportunityDetector:
                         all_opportunities.append(optimal_opp)
                         self.log_opportunity(optimal_opp, token_decimals=decimals_a)
 
+            except (TimeoutError, ConnectionError) as e:
+                classified = classify_web3_exception(e)
+                logger.error(f"RPC failure scanning {token_a[:6]}↔{token_b[:6]} ({type(classified).__name__}): {e}")
             except Exception as e:
-                logger.error(f"Error scanning {token_a[:6]}↔{token_b[:6]}: {e}")
+                classified = classify_web3_exception(e)
+                logger.error(f"{type(classified).__name__}: Error scanning {token_a[:6]}↔{token_b[:6]}: {e}", extra={"retryable": classified.retryable})
 
         # Triangular scan
         try:
@@ -861,8 +891,12 @@ class OpportunityDetector:
             for opp in tri_opps:
                 all_opportunities.append(opp)
                 self.log_opportunity(opp, token_decimals=opp.get('token_decimals', 6))
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.error(f"RPC failure in triangular scan ({type(classified).__name__}): {e}")
         except Exception as e:
-            logger.error(f"Error in triangular scan: {e}")
+            classified = classify_web3_exception(e)
+            logger.error(f"{type(classified).__name__}: Error in triangular scan: {e}", extra={"retryable": classified.retryable})
 
         return all_opportunities
 
@@ -893,8 +927,12 @@ class OpportunityDetector:
                         logger.warning(f"⚠️  Gas too high ({current_gas_gwei:.2f} > {self.max_gas_price_gwei}), skipping...")
                         time.sleep(self.check_interval + random.uniform(0, self.check_interval * 0.5))
                         continue
+                except (TimeoutError, ConnectionError) as e:
+                    classified = classify_web3_exception(e)
+                    logger.warning(f"RPC failure checking gas price ({type(classified).__name__}): {e}")
                 except Exception as e:
-                    logger.warning(f"Failed to check gas price: {e}")
+                    classified = classify_web3_exception(e)
+                    logger.warning(f"{type(classified).__name__}: Failed to check gas price: {e}", extra={"retryable": classified.retryable})
 
                 # Scan for opportunities
                 opportunities = self.scan_opportunities()
@@ -915,8 +953,12 @@ class OpportunityDetector:
 
         except KeyboardInterrupt:
             logger.info("\n⛔ Detector stopped by user")
+        except (TimeoutError, ConnectionError) as e:
+            classified = classify_web3_exception(e)
+            logger.error(f"❌ Detector RPC failure ({type(classified).__name__}): {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"❌ Detector error: {e}", exc_info=True)
+            classified = classify_web3_exception(e)
+            logger.error(f"❌ Detector error ({type(classified).__name__}): {e}", exc_info=True, extra={"retryable": classified.retryable})
 
 
 if __name__ == "__main__":
