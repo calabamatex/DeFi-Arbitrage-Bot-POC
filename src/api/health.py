@@ -2,9 +2,11 @@
 Health and metrics HTTP endpoint.
 
 Lightweight server that exposes:
-  GET /health       -> 200/503 JSON health status
-  GET /metrics      -> Prometheus text format
-  GET /api/status   -> Full JSON metrics snapshot
+  GET /health       -> 200/503 JSON health status (backwards compat)
+  GET /healthz      -> 200 liveness probe (always 200 if server is running)
+  GET /readyz       -> 200/503 readiness probe (checks bot initialized)
+  GET /metrics      -> Prometheus text format (auth required if token set)
+  GET /api/status   -> Full JSON metrics snapshot (auth required if token set)
 
 Runs in a background thread — does not block the bot.
 
@@ -18,10 +20,9 @@ import logging
 import os
 import threading
 import time
-import traceback
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Any, Optional
 
 try:
@@ -37,6 +38,12 @@ except ImportError:
     HAS_PROMETHEUS = False
 
 logger = logging.getLogger(__name__)
+
+# Auth token — if set, /api/status and /metrics require Bearer auth
+_AUTH_TOKEN: Optional[str] = os.getenv("HEALTH_AUTH_TOKEN") or None
+
+# Endpoints that never require auth (for container orchestrators)
+_PUBLIC_PATHS = frozenset({"/health", "/healthz", "/readyz"})
 
 
 # -- Prometheus metrics (registered once at module level) --
@@ -150,27 +157,85 @@ class HealthHandler(BaseHTTPRequestHandler):
     """HTTP request handler for health/metrics/status."""
 
     def log_message(self, format, *args):
-        # Suppress default access log noise
+        # Suppress default access log; we log via logger instead
         pass
 
-    def do_GET(self):
-        if self.path == "/health":
-            self._handle_health()
-        elif self.path == "/metrics":
-            self._handle_metrics()
-        elif self.path == "/api/status":
-            self._handle_status()
-        else:
-            self.send_error(404)
+    def _check_auth(self) -> bool:
+        """Check Bearer auth token. Returns True if authorized."""
+        if not _AUTH_TOKEN:
+            return True
+        if self.path in _PUBLIC_PATHS:
+            return True
+        auth_header = self.headers.get("Authorization", "")
+        if auth_header == f"Bearer {_AUTH_TOKEN}":
+            return True
+        logger.warning("Auth failure on %s from %s", self.path, self.client_address[0])
+        self._send_json(401, {"error": "unauthorized"})
+        return False
 
-    def _handle_health(self):
-        health = _get_health()
-        status_code = 200 if health.running else 503
-        body = json.dumps({"status": "ok" if health.running else "down"}).encode()
+    def _send_json(self, status_code: int, data: dict):
+        body = json.dumps(data).encode()
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/health":
+            self._handle_health()
+        elif self.path == "/healthz":
+            self._handle_liveness()
+        elif self.path == "/readyz":
+            self._handle_readiness()
+        elif self.path == "/metrics":
+            if self._check_auth():
+                self._handle_metrics()
+        elif self.path == "/api/status":
+            if self._check_auth():
+                self._handle_status()
+        else:
+            self.send_error(404)
+
+        logger.debug("%s %s -> response sent", self.command, self.path)
+
+    def _handle_health(self):
+        health = _get_health()
+        status_code = 200 if health.running else 503
+        self._send_json(status_code, {"status": "ok" if health.running else "down"})
+
+    def _handle_liveness(self):
+        """Liveness probe: always 200 if the server process is alive."""
+        self._send_json(200, {"status": "alive"})
+
+    def _handle_readiness(self):
+        """Readiness probe: 200 only if bot is initialized and can accept work."""
+        bot = _ref.bot
+        checks = {}
+        ready = True
+
+        # Bot reference exists
+        if bot is None:
+            checks["bot_initialized"] = False
+            ready = False
+        else:
+            checks["bot_initialized"] = True
+
+            # Bot is running (not shutdown)
+            running = getattr(bot, "running", False)
+            checks["bot_running"] = running
+            if not running:
+                ready = False
+
+            # RPC connected
+            try:
+                bot.web3.eth.chain_id
+                checks["rpc_connected"] = True
+            except Exception:
+                checks["rpc_connected"] = False
+                ready = False
+
+        status_code = 200 if ready else 503
+        self._send_json(status_code, {"ready": ready, "checks": checks})
 
     def _handle_metrics(self):
         if HAS_PROMETHEUS:
@@ -181,10 +246,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(output)
         else:
-            self.send_response(501)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"error": "prometheus_client not installed"}')
+            self._send_json(501, {"error": "prometheus_client not installed"})
 
     def _handle_status(self):
         health = _get_health()
@@ -209,10 +271,13 @@ def start_health_server(bot: Any = None, port: int = None):
     if port is None:
         port = int(os.getenv("HEALTH_PORT", "8080"))
 
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    bind_address = os.getenv("HEALTH_BIND_ADDRESS", "127.0.0.1")
+
+    server = ThreadingHTTPServer((bind_address, port), HealthHandler)
 
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
-    logger.info(f"Health server started on port {port}")
+    auth_status = "auth=on" if _AUTH_TOKEN else "auth=off"
+    logger.info(f"Health server started on {bind_address}:{port} ({auth_status})")
     return server

@@ -1,76 +1,72 @@
-# Quickstart Guide
+# Quickstart — Development & Testnet Setup
 
-Get the arbitrage + liquidation bot running from zero to monitoring in 10 steps.
+Get the arbitrage + liquidation bot running from zero to first dry-run in 8 steps.
+
+> **For production deployment, see [docs/OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md).**
 
 ## Prerequisites
 
-- Python 3.11+
-- Docker & Docker Compose
-- Foundry (`curl -L https://foundry.paradigm.xyz | bash && foundryup`)
-- Git
+- **Python 3.11+** (`python3 --version`)
+- **Docker & Docker Compose** (`docker compose version`)
+- **Foundry** (`curl -L https://foundry.paradigm.xyz | bash && foundryup`)
+- **Git** (`git --version`)
 
-## Step 1: Clone & Install
+---
+
+## 1. Clone the Repository
 
 ```bash
-git clone <repo-url> && cd arb_bot_cryp_eea
+git clone <REPO_URL> && cd arb_bot_cryp_eea
+```
+
+## 2. Configure Environment
+
+```bash
 cp .env.example .env
-make install-dev
 ```
 
-## Step 2: Configure Environment
+Edit `.env` and fill in:
 
-Edit `.env` with your values:
+| Variable | What to set |
+|----------|-------------|
+| `POSTGRES_PASSWORD` | Generate: `openssl rand -base64 32` |
+| `REDIS_PASSWORD` | Generate: `openssl rand -base64 32` |
+| `POLYGON_AMOY_RPC_URL` | Free endpoint from Alchemy/Infura for Polygon Amoy (chain 80002) |
+| `ARBITRUM_SEPOLIA_RPC_URL` | Free endpoint from Alchemy/Infura for Arbitrum Sepolia (chain 421614) |
+
+Leave `EXECUTION_MODE=testnet` and `DRY_RUN=true` (defaults).
+
+## 3. Create Encrypted Keystore
 
 ```bash
-# Required — RPC endpoints (get free ones from Alchemy/Infura)
-POLYGON_AMOY_RPC_URL=https://polygon-amoy.g.alchemy.com/v2/YOUR_KEY
-ARBITRUM_SEPOLIA_RPC_URL=https://arb-sepolia.g.alchemy.com/v2/YOUR_KEY
-
-# Required — Private key (option A: keystore, option B: env var)
-# Option A (recommended):
 python -m src.utils.key_manager create
-# Then set: KEYSTORE_FILE=keystore/deployer.json
-
-# Option B (dev/CI only):
-# PRIVATE_KEY=0x...
-
-# Optional — Telegram alerts
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
 ```
 
-## Step 3: Validate Configuration
+Follow the prompts to encrypt your deployer private key. Then set:
 
 ```bash
-python scripts/validate_config.py
+# In .env
+KEYSTORE_FILE=keystore/deployer.json
 ```
 
-All checks should show PASS or WARN (warnings are non-blocking).
+> **Never set `PRIVATE_KEY` directly in `.env`.** Use the encrypted keystore for all key management.
 
-## Step 4: Start Infrastructure
+## 4. Set Up Infrastructure
 
 ```bash
-make docker-up
+make setup
 ```
 
-This starts PostgreSQL (TimescaleDB) and Redis. Wait for health checks to pass.
+This runs:
+- Installs Python dependencies
+- Starts PostgreSQL (TimescaleDB) and Redis via Docker
+- Runs database migrations
+- Validates configuration
 
-## Step 5: Run Database Migrations
-
-```bash
-make migrate
-```
-
-Creates all required tables (chains, tokens, opportunities, trades, etc.).
-
-## Step 6: Deploy Contracts (Testnet)
+## 5. Deploy Contracts to Testnet
 
 ```bash
-# Polygon Amoy
-forge script script/Deploy.s.sol --rpc-url polygon_amoy --broadcast --verify
-
-# Arbitrum Sepolia
-forge script script/Deploy.s.sol --rpc-url arbitrum_sepolia --broadcast --verify
+make deploy-testnet CHAIN=polygon_amoy
 ```
 
 Copy the deployed addresses into `.env`:
@@ -81,105 +77,119 @@ UNISWAP_V3_ADAPTER_ADDRESS=0x...
 UNISWAP_V2_ADAPTER_ADDRESS=0x...
 ```
 
-## Step 7: Run Smoke Test
+Repeat for Arbitrum Sepolia if desired:
 
 ```bash
-python scripts/testnet_smoke_test.py --chain polygon_amoy
-python scripts/testnet_smoke_test.py --chain arbitrum_sepolia
+make deploy-testnet CHAIN=arbitrum_sepolia
 ```
 
-Verifies: RPC connection, chain ID, contract deployment, DB connectivity, module imports.
-
-## Step 8: Start Bot (Dry Run)
+## 6. Run in Dry-Run Mode
 
 ```bash
-# Ensure dry-run is enabled (default)
-# DRY_RUN=true in .env or Config defaults
-
-# Arbitrage bot
-python run_bot.py --chain polygon_amoy
-
-# Or with Docker
-docker-compose up -d arb-bot
+make run-bot DRY_RUN=true
 ```
 
-The bot will scan for opportunities but not execute real transactions.
+The bot scans for arbitrage opportunities but simulates (does not send) transactions.
 
-## Step 9: Monitor
+## 7. Verify
 
 ```bash
 # Health check
-curl http://localhost:8080/health
+make status
 
-# Full metrics
-curl http://localhost:8080/api/status
-
-# Prometheus metrics
-curl http://localhost:8080/metrics
-
-# Docker logs
-make logs
+# Smoke test
+make smoke-test
 ```
 
-## Step 10: Enable Live Execution
+Expected output:
+- `make status` → `{"status": "ok"}` (200)
+- `make smoke-test` → all checks PASS
 
-Only after 48+ hours of successful dry-run:
+## 8. Enable Live Testnet Execution
 
-1. Review the [Production Checklist](PRODUCTION_CHECKLIST.md)
-2. Set `DRY_RUN=false` in `.env`
-3. Set `EXECUTION_MODE=mainnet`
-4. Fund wallet with gas tokens
-5. Restart: `docker-compose restart arb-bot`
+After verifying dry-run works:
+
+1. Set `DRY_RUN=false` in `.env`
+2. Restart: `docker compose restart arb-bot`
+3. Monitor: `make logs`
+
+---
+
+## Troubleshooting
+
+### 1. `docker compose up` fails with "Set POSTGRES_PASSWORD"
+
+**Cause:** Required secrets not configured in `.env`.
+
+**Fix:** Generate and set passwords:
+```bash
+echo "POSTGRES_PASSWORD=$(openssl rand -base64 32)" >> .env
+echo "REDIS_PASSWORD=$(openssl rand -base64 32)" >> .env
+```
+
+### 2. `make migrate` fails with "connection refused"
+
+**Cause:** PostgreSQL container not ready yet.
+
+**Fix:** Wait for health check, then retry:
+```bash
+docker compose up -d postgres && sleep 10 && make migrate
+```
+
+### 3. Bot reports "No private key configured"
+
+**Cause:** `KEYSTORE_FILE` not set or file doesn't exist.
+
+**Fix:** Create the keystore:
+```bash
+python -m src.utils.key_manager create
+# Then set KEYSTORE_FILE=keystore/deployer.json in .env
+```
+
+### 4. RPC connection timeout
+
+**Cause:** RPC endpoint unreachable or rate-limited.
+
+**Fix:**
+- Verify the URL is correct for the chain (Amoy = 80002, Arb Sepolia = 421614)
+- Switch to a different RPC provider
+- Run: `python scripts/validate_config.py` to test connectivity
+
+### 5. Tests fail with import errors
+
+**Cause:** Missing dependencies.
+
+**Fix:**
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+```
+
+---
 
 ## Makefile Reference
 
 | Command | Description |
 |---------|-------------|
-| `make install` | Install runtime dependencies |
+| `make setup` | Full setup: deps + infra + migrations + validate |
 | `make install-dev` | Install runtime + dev dependencies |
 | `make test` | Run Python tests with coverage |
 | `make test-contracts` | Run Foundry tests |
 | `make lint` | Run flake8 + mypy |
 | `make format` | Auto-format with black + isort |
 | `make docker-build` | Build bot Docker image |
-| `make docker-up` | Start Postgres + Redis + bot |
+| `make docker-up` | Start all containers |
 | `make docker-down` | Stop all containers |
 | `make migrate` | Run database migrations |
 | `make validate` | Run config validation |
 | `make smoke-test` | Run testnet smoke test |
 | `make status` | Check bot health endpoint |
 | `make logs` | Tail Docker logs |
+| `make run-bot` | Start arbitrage bot |
 
-## Directory Structure
-
-```
-arb_bot_cryp_eea/
-├── src/                    # Python bot source
-│   ├── config.py           # Chain configs, risk params
-│   ├── opportunity_detector.py
-│   ├── flash_loan_orchestrator.py
-│   ├── liquidation_detector.py
-│   ├── liquidation_orchestrator.py
-│   ├── api/health.py       # Health/metrics HTTP server
-│   ├── db/                 # SQLAlchemy models + DB layer
-│   └── utils/              # Gas, risk, metrics, logging, price cache
-├── contracts/              # Solidity contracts
-├── test/                   # Foundry tests
-├── tests/                  # Python tests
-├── scripts/                # Validation, smoke test, deployment
-├── config/                 # Prometheus, alert rules, token lists
-├── alembic/                # Database migrations
-├── dashboard/              # Web dashboard (API + frontend)
-├── agent/                  # ARIA AI agent
-├── docker-compose.yml      # Infrastructure services
-├── Dockerfile              # Bot container
-└── Makefile                # Quick-start targets
-```
+---
 
 ## Next Steps
 
-- [Configuration Guide](CONFIGURATION.md) — All environment variables and config options
-- [Operations Runbook](OPERATIONS_RUNBOOK.md) — Daily/weekly maintenance procedures
-- [Troubleshooting](TROUBLESHOOTING.md) — Common issues and solutions
-- [Security Checklist](SECURITY_CHECKLIST.md) — Pre-production security gate
-- [Architecture](ARCHITECTURE.md) — System design and data flow
+- [Operations Runbook](OPERATIONS_RUNBOOK.md) — Production deployment & management
+- [Production Checklist](PRODUCTION_CHECKLIST.md) — Pre-production gate
+- [Security Checklist](SECURITY_CHECKLIST.md) — Security review items

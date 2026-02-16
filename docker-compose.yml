@@ -1,22 +1,39 @@
+# =============================================================================
+# SECURITY: Secret Injection Required
+# =============================================================================
+# This compose file requires the following secrets to be set via environment
+# variables or a .env file BEFORE starting services:
+#
+#   POSTGRES_PASSWORD   — Database password (required, no default)
+#   REDIS_PASSWORD      — Redis AUTH password (required, no default)
+#   PGADMIN_PASSWORD    — PgAdmin login password (required when using tools profile)
+#   HEALTH_AUTH_TOKEN   — Bearer token for health endpoints (recommended)
+#
+# For local development ONLY, set DEV_MODE=true to relax some constraints.
+# NEVER run with DEV_MODE=true in production.
+#
+# Image versions pinned 2025-02-16 — review monthly
+# =============================================================================
+
 version: '3.8'
 
 services:
   postgres:
-    image: timescale/timescaledb:latest-pg16
+    image: timescale/timescaledb:2.17.2-pg16
     container_name: arbitrage_postgres
     environment:
-      POSTGRES_DB: arbitrage_bot
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-arbitrage_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env or environment}
       POSTGRES_INITDB_ARGS: "-E UTF8"
       TZ: "UTC"
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_BIND:-127.0.0.1}:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -25,15 +42,15 @@ services:
       - arbitrage_network
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     container_name: arbitrage_redis
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_BIND:-127.0.0.1}:6379:6379"
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes --requirepass redis_password
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env or environment}
     healthcheck:
-      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--raw", "incr", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -47,8 +64,10 @@ services:
     container_name: arbitrage_bot
     env_file: [.env]
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/arbitrage_bot
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-arbitrage_bot}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379
+      HEALTH_AUTH_TOKEN: ${HEALTH_AUTH_TOKEN:-}
+      DEV_MODE: ${DEV_MODE:-false}
     ports:
       - "8080:8080"
     depends_on:
@@ -67,8 +86,10 @@ services:
     command: ["python", "run_liquidation_bot.py"]
     env_file: [.env]
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/arbitrage_bot
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-arbitrage_bot}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379
+      HEALTH_AUTH_TOKEN: ${HEALTH_AUTH_TOKEN:-}
+      DEV_MODE: ${DEV_MODE:-false}
     ports:
       - "8082:8080"
     depends_on:
@@ -89,8 +110,9 @@ services:
       dockerfile: dashboard/Dockerfile
     container_name: dashboard_api
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/arbitrage_bot
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-arbitrage_bot}
       BOT_API_URL: http://arb-bot:8080
+      HEALTH_AUTH_TOKEN: ${HEALTH_AUTH_TOKEN:-}
     ports:
       - "8000:8000"
     depends_on:
@@ -124,12 +146,12 @@ services:
     profiles:
       - dashboard
 
-  # Prometheus (monitoring)
+  # Prometheus (monitoring) — bound to localhost, requires 'monitoring' profile
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.54.1
     container_name: arbitrage_prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
       - ./config/alert_rules.yml:/etc/prometheus/alert_rules.yml
@@ -137,6 +159,28 @@ services:
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - arbitrage_network
+    profiles:
+      - monitoring
+
+  # Grafana (monitoring) — bound to localhost, requires 'monitoring' profile
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: arbitrage_grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
     restart: unless-stopped
     networks:
       - arbitrage_network
@@ -153,7 +197,7 @@ services:
     environment:
       BOT_API_URL: http://arb-bot:8080
       DASHBOARD_API_URL: http://dashboard-api:8000
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/arbitrage_bot
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-arbitrage_bot}
     depends_on:
       arb-bot:
         condition: service_started
@@ -165,16 +209,16 @@ services:
     profiles:
       - agent
 
-  # Optional: PgAdmin for database management
+  # Optional: PgAdmin for database management — bound to localhost, requires 'tools' profile
   pgadmin:
-    image: dpage/pgadmin4:latest
+    image: dpage/pgadmin4:8.14
     container_name: arbitrage_pgadmin
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@arbitrage.local
-      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@arbitrage.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:?Set PGADMIN_PASSWORD for pgadmin}
       PGADMIN_CONFIG_SERVER_MODE: 'False'
     ports:
-      - "5050:80"
+      - "127.0.0.1:5050:80"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     depends_on:
@@ -185,14 +229,16 @@ services:
     profiles:
       - tools
 
-  # Optional: Redis Commander for Redis management
+  # Optional: Redis Commander for Redis management — bound to localhost, requires 'tools' profile
   redis-commander:
-    image: rediscommander/redis-commander:latest
+    image: rediscommander/redis-commander:0.8.1
     container_name: arbitrage_redis_commander
     environment:
-      - REDIS_HOSTS=local:redis:6379:0:redis_password
+      - REDIS_HOSTS=local:redis:6379:0:${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+      - HTTP_USER=${REDIS_COMMANDER_USER:-admin}
+      - HTTP_PASSWORD=${REDIS_COMMANDER_PASSWORD:?Set REDIS_COMMANDER_PASSWORD}
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
     depends_on:
       - redis
     restart: unless-stopped
@@ -209,6 +255,8 @@ volumes:
   pgadmin_data:
     driver: local
   prometheus_data:
+    driver: local
+  grafana_data:
     driver: local
 
 networks:

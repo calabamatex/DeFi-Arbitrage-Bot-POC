@@ -84,7 +84,17 @@ Every item must be completed before switching from testnet dry-run to mainnet li
 - [ ] Rollback plan documented: previous Docker image tag noted
 - [ ] On-call rotation established (if team)
 
-## 10. Go / No-Go Decision
+## 10. Security Validation
+
+- [ ] No default passwords in production `.env` (`python -m src.config doctor` shows no CRITICAL)
+- [ ] `PRIVATE_KEY` is NOT set in `.env` (using encrypted keystore instead)
+- [ ] Health endpoint bound to internal network or has `HEALTH_AUTH_TOKEN` set
+- [ ] Container images are pinned to specific versions (not using `latest`)
+- [ ] Gitleaks scan passes: `gitleaks detect --source . --no-git`
+- [ ] `ADMIN_RESET_CODE` is set for emergency shutdown recovery
+- [ ] Database and Redis passwords are strong (not defaults)
+
+## 11. Go / No-Go Decision
 
 | Criteria | Status | Notes |
 |----------|--------|-------|

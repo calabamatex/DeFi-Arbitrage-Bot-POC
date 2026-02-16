@@ -1,9 +1,20 @@
 """
 Configuration management for Flash Loan Arbitrage Bot
+
+This is the PRIMARY configuration module. All other config modules (e.g.
+src.bot.config) should delegate to this module for shared values such as
+EXECUTION_MODE, database URLs, Redis passwords, etc.
+
+Security validation:
+    Config.validate_security()   -- fail-fast check for default credentials
+    config_doctor()              -- print all resolved values with status
+    python -m src.config doctor  -- CLI entrypoint for config_doctor()
 """
+import logging
 import os
+import sys
 from typing import Dict, List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -192,18 +203,159 @@ class Config:
         if errors:
             raise ValueError(f"Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors))
 
+    @classmethod
+    def validate_security(cls) -> list:
+        """Fail-fast check for default/insecure credentials.
+
+        Returns a list of (severity, message) tuples. Raises SystemExit
+        in mainnet mode if any CRITICAL issues are found.
+        """
+        issues = []
+        dev_mode = os.getenv("DEV_MODE", "false").lower() == "true"
+
+        # Database URL with default password
+        db_url = cls.db.url
+        if "postgres:postgres@" in db_url or "CHANGE_ME" in db_url:
+            issues.append(("CRITICAL", "DATABASE_URL uses default password"))
+
+        # Redis with default or empty password
+        redis_pw = cls.redis.password
+        if redis_pw in (None, "", "redis_password"):
+            issues.append(("CRITICAL", "REDIS_PASSWORD is default or empty"))
+
+        # PRIVATE_KEY set directly in environment (not keystore)
+        if os.getenv("PRIVATE_KEY") and not cls.KEYSTORE_FILE:
+            issues.append(("WARNING", "PRIVATE_KEY set as env var — use encrypted keystore instead"))
+
+        # Health auth token not set
+        if not os.getenv("HEALTH_AUTH_TOKEN"):
+            issues.append(("WARNING", "HEALTH_AUTH_TOKEN not set — status endpoints are unauthenticated"))
+
+        # Admin reset code not set
+        if not os.getenv("ADMIN_RESET_CODE"):
+            issues.append(("WARNING", "ADMIN_RESET_CODE not set — emergency shutdown reset unavailable"))
+
+        # Mainnet with DRY_RUN still true
+        if cls.EXECUTION_MODE == "mainnet" and cls.DRY_RUN:
+            issues.append(("INFO", "Mainnet mode with DRY_RUN=true — no live trades will execute"))
+
+        # Fail hard if CRITICAL issues on mainnet (unless DEV_MODE)
+        critical = [msg for sev, msg in issues if sev == "CRITICAL"]
+        if critical and cls.EXECUTION_MODE == "mainnet" and not dev_mode:
+            log = logging.getLogger(__name__)
+            for sev, msg in issues:
+                log.error(f"[{sev}] {msg}")
+            raise SystemExit(
+                f"FATAL: {len(critical)} critical security issue(s) in mainnet config. "
+                "Fix before starting. Run: python -m src.config doctor"
+            )
+
+        return issues
+
 
 # Singleton instance
 config = Config()
 
 
-if __name__ == "__main__":
-    # Validate configuration when run directly
+def config_doctor():
+    """Print all resolved configuration values with status indicators."""
+    G = "\033[92m"
+    R = "\033[91m"
+    Y = "\033[93m"
+    C = "\033[96m"
+    N = "\033[0m"
+
+    print(f"\n{'=' * 60}")
+    print(f"  Configuration Doctor")
+    print(f"{'=' * 60}\n")
+
+    # Environment
+    print(f"{C}[Environment]{N}")
+    print(f"  ENV:             {config.ENV}")
+    print(f"  EXECUTION_MODE:  {config.EXECUTION_MODE}")
+    print(f"  DRY_RUN:         {config.DRY_RUN}")
+    print(f"  DEV_MODE:        {os.getenv('DEV_MODE', 'false')}")
+    print(f"  DEBUG:           {config.DEBUG}")
+
+    # Key management
+    print(f"\n{C}[Key Management]{N}")
+    ks = config.KEYSTORE_FILE
+    pk = os.getenv("PRIVATE_KEY")
+    if ks:
+        exists = os.path.exists(ks)
+        print(f"  KEYSTORE_FILE:   {G}set{N} ({ks}) {'exists' if exists else R + 'FILE NOT FOUND' + N}")
+    elif pk:
+        print(f"  PRIVATE_KEY:     {Y}set via env var{N} (keystore recommended)")
+    else:
+        print(f"  Private key:     {R}NOT CONFIGURED{N}")
+
+    # Active chains
+    print(f"\n{C}[Active Chains]{N}")
+    for chain_name in config.get_active_chains():
+        chain = config.CHAINS.get(chain_name)
+        if chain:
+            print(f"  {chain.name}: chain_id={chain.chain_id} rpc={chain.rpc_url[:50]}...")
+
+    # Database
+    print(f"\n{C}[Database]{N}")
+    db_url = config.db.url
+    masked = db_url.split("@")[0].rsplit(":", 1)[0] + ":***@" + db_url.split("@")[-1] if "@" in db_url else db_url
+    print(f"  DATABASE_URL:    {masked}")
+
+    # Redis
+    print(f"\n{C}[Redis]{N}")
+    redis_url = config.redis.url
+    print(f"  REDIS_URL:       {redis_url}")
+    pw = config.redis.password
+    if pw in (None, "", "redis_password"):
+        print(f"  REDIS_PASSWORD:  {R}default/empty{N}")
+    else:
+        print(f"  REDIS_PASSWORD:  {G}set{N}")
+
+    # Trading params
+    print(f"\n{C}[Trading Parameters]{N}")
+    print(f"  MIN_PROFIT_USD:           {config.MIN_PROFIT_USD}")
+    print(f"  MAX_GAS_PRICE_GWEI:       {config.MAX_GAS_PRICE_GWEI}")
+    print(f"  MAX_FLASH_LOAN_AMOUNT_USD: {config.MAX_FLASH_LOAN_AMOUNT_USD}")
+    print(f"  MAX_SLIPPAGE_PERCENTAGE:   {config.MAX_SLIPPAGE_PERCENTAGE}")
+
+    # Liquidation
+    print(f"\n{C}[Liquidation]{N}")
+    print(f"  ENABLED:         {config.LIQUIDATION_ENABLED}")
+    print(f"  MIN_PROFIT_USD:  {config.LIQUIDATION_MIN_PROFIT_USD}")
+    print(f"  SCAN_INTERVAL:   {config.LIQUIDATION_SCAN_INTERVAL}s")
+
+    # Security check
+    print(f"\n{C}[Security Validation]{N}")
+    issues = config.validate_security()
+    if not issues:
+        print(f"  {G}No issues found{N}")
+    for sev, msg in issues:
+        color = R if sev == "CRITICAL" else Y if sev == "WARNING" else N
+        print(f"  {color}[{sev}]{N} {msg}")
+
+    # Config.validate()
+    print(f"\n{C}[Config Validation]{N}")
     try:
         config.validate()
-        print("✅ Configuration validated successfully")
-        print(f"\nActive chains: {', '.join(config.get_active_chains())}")
-        print(f"Execution mode: {config.EXECUTION_MODE}")
-        print(f"Dry run: {config.DRY_RUN}")
+        print(f"  {G}PASS{N} Config.validate()")
     except ValueError as e:
-        print(f"❌ Configuration validation failed:\n{e}")
+        print(f"  {R}FAIL{N} {e}")
+
+    print(f"\n{'=' * 60}\n")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+        config_doctor()
+    else:
+        try:
+            config.validate()
+            print("Configuration validated successfully")
+            print(f"\nActive chains: {', '.join(config.get_active_chains())}")
+            print(f"Execution mode: {config.EXECUTION_MODE}")
+            print(f"Dry run: {config.DRY_RUN}")
+            print("\nRun 'python -m src.config doctor' for detailed diagnostics.")
+        except ValueError as e:
+            print(f"Configuration validation failed:\n{e}")
+            sys.exit(1)
