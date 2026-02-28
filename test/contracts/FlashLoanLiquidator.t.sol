@@ -167,6 +167,7 @@ contract FlashLoanLiquidatorTest is Test {
             adapter: address(adapter),
             swapData: "",
             minProfit: 100000,
+            minSwapAmountOut: 0,
             deadline: block.timestamp + 300
         });
 
@@ -192,6 +193,7 @@ contract FlashLoanLiquidatorTest is Test {
             adapter: address(adapter),
             swapData: "",
             minProfit: 100000,
+            minSwapAmountOut: 0,
             deadline: block.timestamp + 300
         });
 
@@ -210,6 +212,7 @@ contract FlashLoanLiquidatorTest is Test {
             adapter: address(adapter),
             swapData: "",
             minProfit: 0,
+            minSwapAmountOut: 0,
             deadline: block.timestamp - 1
         });
 
@@ -228,6 +231,7 @@ contract FlashLoanLiquidatorTest is Test {
             adapter: address(0xDEAD),
             swapData: "",
             minProfit: 0,
+            minSwapAmountOut: 0,
             deadline: block.timestamp + 300
         });
 
@@ -249,6 +253,7 @@ contract FlashLoanLiquidatorTest is Test {
             adapter: address(adapter),
             swapData: "",
             minProfit: 0,
+            minSwapAmountOut: 0,
             deadline: block.timestamp + 300
         });
 
@@ -270,6 +275,7 @@ contract FlashLoanLiquidatorTest is Test {
             adapter: address(adapter),
             swapData: "",
             minProfit: 0,
+            minSwapAmountOut: 0,
             deadline: block.timestamp + 300
         });
 
@@ -301,5 +307,12 @@ contract FlashLoanLiquidatorTest is Test {
         uint256 balBefore = debtToken.balanceOf(owner);
         liquidator.emergencyWithdraw(address(debtToken), 1000, owner);
         assertEq(debtToken.balanceOf(owner) - balBefore, 1000);
+    }
+
+    // ── Zero-address constructor ───────────────────────────────────
+
+    function test_revertZeroAddressConstructor() public {
+        vm.expectRevert("Invalid address provider");
+        new FlashLoanLiquidator(address(0), 100000);
     }
 }

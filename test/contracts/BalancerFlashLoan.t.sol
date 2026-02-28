@@ -80,6 +80,8 @@ contract MockAdapter {
 // ──────────────────────────────────────────────────────────────────────
 
 contract BalancerFlashLoanTest is Test {
+    event EmergencyWithdrawal(address indexed token, uint256 amount, address indexed to);
+
     BalancerFlashLoan balancer;
     MockBalancerVault vault;
     MockAdapter profitableAdapter;
@@ -410,5 +412,63 @@ contract BalancerFlashLoanTest is Test {
         vm.prank(user);
         vm.expectRevert(BalancerFlashLoan.UnauthorizedCaller.selector);
         balancer.receiveFlashLoan(tokens, amounts, fees, "");
+    }
+
+    // ── _isExecuting guard ──────────────────────────────────────────
+
+    function test_revertReceiveFlashLoanNotExecuting() public {
+        // Call receiveFlashLoan from the vault address but without going
+        // through executeArbitrage, so _isExecuting is false.
+        IERC20[] memory tokens = new IERC20[](0);
+        uint256[] memory amounts = new uint256[](0);
+        uint256[] memory fees = new uint256[](0);
+
+        vm.prank(address(vault));
+        vm.expectRevert("Not initiated by this contract");
+        balancer.receiveFlashLoan(tokens, amounts, fees, "");
+    }
+
+    // ── Zero-address constructor ────────────────────────────────────
+
+    function test_revertZeroAddressConstructor() public {
+        vm.expectRevert("Invalid vault address");
+        new BalancerFlashLoan(address(0), 100000, 200);
+    }
+
+    // ── MAX_STEPS ───────────────────────────────────────────────────
+
+    function test_revertTooManySteps() public {
+        BalancerFlashLoan.SwapStep[] memory steps = new BalancerFlashLoan.SwapStep[](11);
+        for (uint256 i = 0; i < 11; i++) {
+            steps[i] = BalancerFlashLoan.SwapStep({
+                adapter: address(profitableAdapter),
+                tokenIn: address(tokenA),
+                tokenOut: address(tokenB),
+                minAmountOut: 0,
+                data: ""
+            });
+        }
+
+        BalancerFlashLoan.ArbitrageParams memory params = BalancerFlashLoan.ArbitrageParams({
+            steps: steps,
+            flashLoanAmount: 1000,
+            flashLoanAsset: address(tokenA),
+            minFinalAmount: 0,
+            deadline: block.timestamp + 300
+        });
+
+        vm.expectRevert("Too many steps");
+        balancer.executeArbitrage(params);
+    }
+
+    // ── EmergencyWithdrawal event ───────────────────────────────────
+
+    function test_emergencyWithdrawEmitsEvent() public {
+        tokenA.mint(address(balancer), 1000);
+
+        vm.expectEmit(true, true, false, true);
+        emit EmergencyWithdrawal(address(tokenA), 1000, owner);
+
+        balancer.emergencyWithdraw(address(tokenA), 1000, owner);
     }
 }

@@ -495,6 +495,69 @@ contract FlashLoanArbitrageV2Test is Test {
         arb.emergencyWithdraw(address(tokenA), 0, nonOwner);
     }
 
+    // ── Zero-Address Constructor ──────────────────────────────────
+
+    function testRevertOnZeroAddressConstructor() public {
+        vm.expectRevert("Invalid address provider");
+        new FlashLoanArbitrageV2(address(0), 100, 200);
+    }
+
+    // ── MAX_STEPS ─────────────────────────────────────────────────
+
+    function testRevertOnTooManySteps() public {
+        FlashLoanArbitrageV2.SwapStep[] memory steps = new FlashLoanArbitrageV2.SwapStep[](11);
+        for (uint256 i = 0; i < 11; i++) {
+            steps[i] = FlashLoanArbitrageV2.SwapStep({
+                adapter: address(adapter1),
+                tokenIn: address(tokenA),
+                tokenOut: address(tokenB),
+                minAmountOut: 0,
+                data: ""
+            });
+        }
+
+        FlashLoanArbitrageV2.ArbitrageParams memory params = FlashLoanArbitrageV2.ArbitrageParams({
+            steps: steps,
+            flashLoanAmount: 1000e6,
+            flashLoanAsset: address(tokenA),
+            minFinalAmount: 1000e6,
+            deadline: block.timestamp + 1 hours
+        });
+
+        vm.expectRevert("Too many steps");
+        arb.executeArbitrage(params);
+    }
+
+    // ── Emergency Withdraw updates totalProfits ───────────────────
+
+    function testEmergencyWithdrawUpdatesTotalProfits() public {
+        // Execute a profitable arb to generate tracked profits
+        testSuccessfulArbitrage();
+
+        uint256 profitBefore = arb.totalProfits(address(tokenA));
+        assertTrue(profitBefore > 0, "Should have tracked profit");
+
+        uint256 contractBal = tokenA.balanceOf(address(arb));
+        arb.emergencyWithdraw(address(tokenA), contractBal, owner);
+
+        // totalProfits should be zeroed out since we withdrew everything
+        assertEq(arb.totalProfits(address(tokenA)), 0);
+    }
+
+    // ── setAdapter(address(0)) reverts ────────────────────────────
+
+    function testSetAdapterZeroAddressReverts() public {
+        vm.expectRevert("Invalid adapter address");
+        arb.setAdapter(address(0), true);
+    }
+
+    // ── withdrawProfits to address(0) reverts ─────────────────────
+
+    function testWithdrawProfitsToZeroAddressReverts() public {
+        vm.expectRevert("Invalid recipient");
+        arb.withdrawProfits(address(tokenA), 0, address(0));
+    }
+
     // ── Swap failure ────────────────────────────────────────────────
 
     function testSwapFailureReverts() public {

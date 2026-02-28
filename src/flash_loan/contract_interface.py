@@ -2,14 +2,31 @@
 Web3 interface for FlashLoanArbitrageV2 contract
 """
 from typing import List, Dict, Any, Optional
+from pathlib import Path
 from web3 import Web3
 from web3.contract import Contract
 from web3.types import TxParams, Wei, TxReceipt
 from eth_account import Account
 from decimal import Decimal
 import json
+import logging
 
 from src.config import config
+
+logger = logging.getLogger(__name__)
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+_FORGE_ARTIFACT = (
+    _PROJECT_ROOT / "out" / "FlashLoanArbitrageV2.sol" / "FlashLoanArbitrageV2.json"
+)
+_HARDHAT_ARTIFACT = (
+    _PROJECT_ROOT
+    / "artifacts"
+    / "contracts"
+    / "FlashLoanArbitrageV2.sol"
+    / "FlashLoanArbitrageV2.json"
+)
 
 
 class SwapStep:
@@ -45,9 +62,7 @@ class FlashLoanArbitrageContract:
     Interface for interacting with FlashLoanArbitrageV2 smart contract
     """
 
-    # Contract ABI (simplified - load full ABI from artifacts)
-    # This would be loaded from the compiled contract artifacts in production
-    ABI = [
+    _FALLBACK_ABI: List[Dict[str, Any]] = [
         {
             "inputs": [
                 {
@@ -78,7 +93,10 @@ class FlashLoanArbitrageContract:
             "type": "function",
         },
         {
-            "inputs": [{"name": "adapter", "type": "address"}, {"name": "status", "type": "bool"}],
+            "inputs": [
+                {"name": "adapter", "type": "address"},
+                {"name": "status", "type": "bool"},
+            ],
             "name": "setAdapter",
             "outputs": [],
             "stateMutability": "nonpayable",
@@ -100,16 +118,44 @@ class FlashLoanArbitrageContract:
         },
     ]
 
+    @classmethod
+    def _load_abi(cls) -> List[Dict[str, Any]]:
+        """Load ABI from compiled artifacts, falling back to hardcoded ABI.
+
+        Tries Forge output first, then Hardhat artifacts, and finally
+        falls back to _FALLBACK_ABI so the code works even without
+        compiled contracts.
+        """
+        for artifact_path in (_FORGE_ARTIFACT, _HARDHAT_ARTIFACT):
+            if artifact_path.exists():
+                try:
+                    with open(artifact_path) as f:
+                        artifact = json.load(f)
+                    abi = artifact.get("abi")
+                    if abi:
+                        logger.info("Loaded ABI from %s", artifact_path)
+                        return abi
+                except (json.JSONDecodeError, OSError) as exc:
+                    logger.warning(
+                        "Failed to read ABI from %s: %s", artifact_path, exc
+                    )
+                    continue
+        logger.info("No compiled artifacts found; using fallback ABI")
+        return cls._FALLBACK_ABI
+
     def __init__(self, chain_name: str, contract_address: Optional[str] = None):
         """
         Initialize contract interface
 
         Args:
-            chain_name: Name of the chain (e.g., 'polygon', 'mumbai')
+            chain_name: Name of the chain (e.g., 'polygon')
             contract_address: Deployed contract address (optional, can be set later)
         """
         self.chain_name = chain_name
         self.chain_config = config.CHAINS[chain_name]
+
+        # Load ABI from compiled artifacts (or fallback)
+        self._abi = self._load_abi()
 
         # Initialize Web3
         self.w3 = Web3(Web3.HTTPProvider(self.chain_config.rpc_url))
@@ -128,13 +174,16 @@ class FlashLoanArbitrageContract:
         self.contract: Optional[Contract] = None
         if contract_address:
             self.contract = self.w3.eth.contract(
-                address=Web3.to_checksum_address(contract_address), abi=self.ABI
+                address=Web3.to_checksum_address(contract_address),
+                abi=self._abi,
             )
 
     def set_contract_address(self, address: str) -> None:
         """Set contract address after deployment"""
         self.contract_address = Web3.to_checksum_address(address)
-        self.contract = self.w3.eth.contract(address=self.contract_address, abi=self.ABI)
+        self.contract = self.w3.eth.contract(
+            address=self.contract_address, abi=self._abi
+        )
 
     def execute_arbitrage(
         self,
@@ -292,25 +341,10 @@ class FlashLoanArbitrageContract:
         gas_price_wei = self.w3.eth.gas_price
         return float(Web3.from_wei(gas_price_wei, "gwei"))
 
-    @staticmethod
-    def load_abi_from_file(filepath: str) -> List[Dict[str, Any]]:
-        """
-        Load contract ABI from compiled artifacts
-
-        Args:
-            filepath: Path to ABI JSON file
-
-        Returns:
-            Contract ABI
-        """
-        with open(filepath, "r") as f:
-            artifact = json.load(f)
-            return artifact.get("abi", [])
-
 
 # Helper function to create contract instance
 def get_flash_loan_contract(
-    chain_name: str = "mumbai", contract_address: Optional[str] = None
+    chain_name: str = "polygon", contract_address: Optional[str] = None
 ) -> FlashLoanArbitrageContract:
     """
     Factory function to create FlashLoanArbitrageContract instance

@@ -3,6 +3,8 @@ pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 /**
  * @title ICurvePool
@@ -28,16 +30,13 @@ interface ICurvePool {
  * @notice Adapter for executing swaps on Curve StableSwap pools
  * @dev Implements IDEXAdapter interface with access control and pool registry
  */
-contract CurveAdapter {
+contract CurveAdapter is Ownable2Step {
     using SafeERC20 for IERC20;
-
-    /// @notice Contract owner
-    address public owner;
 
     /// @notice Authorized callers (e.g., FlashLoanArbitrageV2)
     mapping(address => bool) public authorized;
 
-    /// @notice Pool registry: keccak256(tokenA, tokenB) → PoolInfo
+    /// @notice Pool registry: keccak256(tokenA, tokenB) -> PoolInfo
     struct PoolInfo {
         address pool;
         int128 indexA;
@@ -49,25 +48,18 @@ contract CurveAdapter {
 
     /// @notice Events
     event AuthorizedUpdated(address indexed account, bool status);
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event PoolRegistered(address indexed pool, address tokenA, address tokenB, int128 indexA, int128 indexB);
 
     /// @notice Errors
     error Unauthorized();
     error PoolNotRegistered(address tokenIn, address tokenOut);
 
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert Unauthorized();
-        _;
-    }
-
     modifier onlyAuthorized() {
         if (!authorized[msg.sender]) revert Unauthorized();
         _;
     }
 
-    constructor() {
-        owner = msg.sender;
+    constructor() Ownable(msg.sender) {
         authorized[msg.sender] = true;
     }
 
@@ -77,18 +69,9 @@ contract CurveAdapter {
      * @param status True to authorize, false to revoke
      */
     function setAuthorized(address account, bool status) external onlyOwner {
+        require(account != address(0), "Invalid account");
         authorized[account] = status;
         emit AuthorizedUpdated(account, status);
-    }
-
-    /**
-     * @notice Transfer ownership
-     * @param newOwner New owner address
-     */
-    function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "Invalid owner");
-        emit OwnershipTransferred(owner, newOwner);
-        owner = newOwner;
     }
 
     /**
@@ -107,6 +90,7 @@ contract CurveAdapter {
         int128 indexB
     ) external onlyOwner {
         require(pool != address(0), "Invalid pool");
+        require(tokenA != address(0) && tokenB != address(0), "Invalid token");
 
         // Register both directions
         bytes32 keyAB = _pairKey(tokenA, tokenB);
@@ -124,7 +108,7 @@ contract CurveAdapter {
      * @param tokenOut Output token
      * @param amountIn Amount to swap
      * @param minAmountOut Minimum output
-     * @param deadline Transaction deadline (unused by Curve, kept for interface)
+     * @param deadline Transaction deadline
      * @param recipient Recipient of output tokens
      * @param data Unused for Curve (kept for interface compatibility)
      * @return amountOut Amount received
@@ -138,6 +122,8 @@ contract CurveAdapter {
         address recipient,
         bytes calldata data
     ) external onlyAuthorized returns (uint256 amountOut) {
+        require(block.timestamp <= deadline, "Deadline expired");
+
         PoolInfo memory info = _getPool(tokenIn, tokenOut);
 
         // Approve pool

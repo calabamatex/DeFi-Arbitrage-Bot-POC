@@ -62,6 +62,7 @@ contract FlashLoanLiquidator is Ownable, ReentrancyGuard, Pausable {
         address adapter;
         bytes swapData;
         uint256 minProfit;
+        uint256 minSwapAmountOut; // Minimum output from collateral→debt swap
         uint256 deadline;
     }
 
@@ -89,6 +90,7 @@ contract FlashLoanLiquidator is Ownable, ReentrancyGuard, Pausable {
         address _addressProvider,
         uint256 _minProfit
     ) Ownable(msg.sender) {
+        require(_addressProvider != address(0), "Invalid address provider");
         ADDRESSES_PROVIDER = IPoolAddressesProvider(_addressProvider);
         POOL = IPool(ADDRESSES_PROVIDER.getPool());
         minProfit = _minProfit;
@@ -185,7 +187,7 @@ contract FlashLoanLiquidator is Ownable, ReentrancyGuard, Pausable {
             liqParams.collateralAsset,
             liqParams.debtAsset,
             collateralReceived,
-            0, // min out — we check profit below
+            liqParams.minSwapAmountOut,
             liqParams.deadline,
             address(this),
             liqParams.swapData
@@ -198,22 +200,10 @@ contract FlashLoanLiquidator is Ownable, ReentrancyGuard, Pausable {
         uint256 swapReceived = IERC20(liqParams.debtAsset).balanceOf(address(this)) - debtBefore;
 
         // 4. Calculate repayment and profit
-        uint256 amountOwed = amounts[0] + premiums[0];
-
-        if (swapReceived + amounts[0] <= amountOwed) {
-            // amounts[0] was the flash loan we still hold (minus what was spent on liquidation)
-            // Actually we spent amounts[0] on liquidation, got collateral, swapped to debt token
-            // Current debt token balance = swapReceived + whatever was left
-            revert InsufficientProfit(0, liqParams.minProfit);
-        }
-
-        // Total debt token we have = original balance (0 pre-flash) + flash loan + swapReceived
-        // We spent debtToCover on liquidation, so available = amounts[0] - debtToCover + swapReceived
-        // But debtToCover == amounts[0], so available = swapReceived
-        // Actually the flash loan gave us amounts[0], we approved & liquidation took debtToCover from us.
-        // debtToCover == amounts[0]. So after liquidation we have 0 debt tokens.
+        // After liquidation we have 0 debt tokens (debtToCover == amounts[0]).
         // After swap we have swapReceived debt tokens.
         // We need to repay amountOwed = amounts[0] + premiums[0].
+        uint256 amountOwed = amounts[0] + premiums[0];
 
         if (swapReceived < amountOwed) {
             revert InsufficientProfit(0, liqParams.minProfit);
@@ -238,6 +228,7 @@ contract FlashLoanLiquidator is Ownable, ReentrancyGuard, Pausable {
     // ------------------------------------------------------------------
 
     function setAdapter(address adapter, bool status) external onlyOwner {
+        require(adapter != address(0), "Invalid adapter");
         registeredAdapters[adapter] = status;
         emit AdapterRegistered(adapter, status);
     }
@@ -252,13 +243,20 @@ contract FlashLoanLiquidator is Ownable, ReentrancyGuard, Pausable {
     function unpause() external onlyOwner { _unpause(); }
 
     function withdrawProfits(address token, uint256 amount, address to) external onlyOwner nonReentrant {
+        require(to != address(0), "Invalid recipient");
         require(amount <= totalProfits[token], "Insufficient profits");
         totalProfits[token] -= amount;
         IERC20(token).safeTransfer(to, amount);
     }
 
     function emergencyWithdraw(address token, uint256 amount, address to) external onlyOwner nonReentrant {
+        require(to != address(0), "Invalid recipient");
         IERC20(token).safeTransfer(to, amount);
+        if (totalProfits[token] > amount) {
+            totalProfits[token] -= amount;
+        } else {
+            totalProfits[token] = 0;
+        }
     }
 
     function getBalance(address token) external view returns (uint256) {

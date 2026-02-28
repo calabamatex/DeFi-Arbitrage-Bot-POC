@@ -93,7 +93,7 @@ contract CurveAdapterTest is Test {
 
     function test_registerPoolOnlyOwner() public {
         vm.prank(user);
-        vm.expectRevert(CurveAdapter.Unauthorized.selector);
+        vm.expectRevert();
         adapter.registerPool(address(pool), address(tokenA), address(tokenB), 0, 1);
     }
 
@@ -109,26 +109,38 @@ contract CurveAdapterTest is Test {
 
     function test_setAuthorizedOnlyOwner() public {
         vm.prank(user);
-        vm.expectRevert(CurveAdapter.Unauthorized.selector);
+        vm.expectRevert();
         adapter.setAuthorized(user, true);
     }
 
     // ── Ownership ─────────────────────────────────────────────────────
 
     function test_transferOwnership() public {
+        // Ownable2Step: transferOwnership sets pending owner, not immediate
         adapter.transferOwnership(user);
-        assertEq(adapter.owner(), user);
-    }
+        // Owner is still the original until acceptOwnership is called
+        assertEq(adapter.owner(), owner);
+        assertEq(adapter.pendingOwner(), user);
 
-    function test_transferOwnershipZeroAddress() public {
-        vm.expectRevert("Invalid owner");
-        adapter.transferOwnership(address(0));
+        // Complete the transfer via acceptOwnership
+        vm.prank(user);
+        adapter.acceptOwnership();
+        assertEq(adapter.owner(), user);
     }
 
     function test_transferOwnershipOnlyOwner() public {
         vm.prank(user);
-        vm.expectRevert(CurveAdapter.Unauthorized.selector);
+        vm.expectRevert();
         adapter.transferOwnership(user);
+    }
+
+    function test_acceptOwnershipOnlyPendingOwner() public {
+        adapter.transferOwnership(user);
+
+        // A random address cannot accept
+        vm.prank(address(0xDEAD));
+        vm.expectRevert();
+        adapter.acceptOwnership();
     }
 
     // ── Get Quote ─────────────────────────────────────────────────────
@@ -279,6 +291,24 @@ contract CurveAdapterTest is Test {
 
         // Approval should be reset to 0
         assertEq(tokenA.allowance(address(adapter), address(pool)), 0);
+    }
+
+    // ── Deadline Enforcement ────────────────────────────────────────────
+
+    function test_swapDirectDeadlineExpired() public {
+        uint256 amountIn = 1000 * 1e18;
+        tokenA.mint(address(adapter), amountIn);
+
+        vm.expectRevert("Deadline expired");
+        adapter.swapDirect(
+            address(tokenA),
+            address(tokenB),
+            amountIn,
+            0,
+            block.timestamp - 1, // expired deadline
+            address(this),
+            ""
+        );
     }
 
     // ── Reverse Direction ─────────────────────────────────────────────

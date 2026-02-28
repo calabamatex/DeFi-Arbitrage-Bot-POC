@@ -3,6 +3,8 @@ pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 /**
  * @title ISwapRouter
@@ -54,11 +56,8 @@ interface IQuoterV2 {
  * @notice Adapter for executing swaps on Uniswap V3
  * @dev Implements IDEXAdapter interface with access control (C-01, C-02)
  */
-contract UniswapV3Adapter {
+contract UniswapV3Adapter is Ownable2Step {
     using SafeERC20 for IERC20;
-
-    /// @notice Contract owner
-    address public owner;
 
     /// @notice Authorized callers (e.g., FlashLoanArbitrageV2)
     mapping(address => bool) public authorized;
@@ -76,27 +75,22 @@ contract UniswapV3Adapter {
 
     /// @notice Events
     event AuthorizedUpdated(address indexed account, bool status);
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     /// @notice Errors
     error Unauthorized();
     error InvalidFee(uint24 fee);
     error InvalidDataLength();
 
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert Unauthorized();
-        _;
-    }
-
     modifier onlyAuthorized() {
         if (!authorized[msg.sender]) revert Unauthorized();
         _;
     }
 
-    constructor(address _swapRouter, address _quoter) {
+    constructor(address _swapRouter, address _quoter) Ownable(msg.sender) {
+        require(_swapRouter != address(0), "Invalid router");
+        require(_quoter != address(0), "Invalid quoter");
         swapRouter = ISwapRouter(_swapRouter);
         quoter = IQuoterV2(_quoter);
-        owner = msg.sender;
         authorized[msg.sender] = true;
     }
 
@@ -106,18 +100,9 @@ contract UniswapV3Adapter {
      * @param status True to authorize, false to revoke
      */
     function setAuthorized(address account, bool status) external onlyOwner {
+        require(account != address(0), "Invalid account");
         authorized[account] = status;
         emit AuthorizedUpdated(account, status);
-    }
-
-    /**
-     * @notice Transfer ownership
-     * @param newOwner New owner address
-     */
-    function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "Invalid owner");
-        emit OwnershipTransferred(owner, newOwner);
-        owner = newOwner;
     }
 
     /**
@@ -128,7 +113,7 @@ contract UniswapV3Adapter {
      * @param minAmountOut Minimum output
      * @param deadline Transaction deadline
      * @param recipient Recipient of output tokens
-     * @param data ABI-encoded uint24 fee tier
+     * @param data ABI-encoded uint24 fee tier, optionally followed by uint160 sqrtPriceLimitX96
      * @return amountOut Amount received
      */
     function swapDirect(
@@ -140,9 +125,17 @@ contract UniswapV3Adapter {
         address recipient,
         bytes calldata data
     ) external onlyAuthorized returns (uint256 amountOut) {
-        // Decode fee from data
-        if (data.length < 32) revert InvalidDataLength();
-        uint24 fee = abi.decode(data, (uint24));
+        // Decode fee and optional price limit from data
+        uint24 fee;
+        uint160 sqrtPriceLimitX96;
+        if (data.length >= 64) {
+            (fee, sqrtPriceLimitX96) = abi.decode(data, (uint24, uint160));
+        } else if (data.length >= 32) {
+            fee = abi.decode(data, (uint24));
+            sqrtPriceLimitX96 = 0; // No limit if not provided (backwards compatible)
+        } else {
+            revert InvalidDataLength();
+        }
 
         // Validate fee tier
         if (fee != FEE_LOW && fee != FEE_MEDIUM && fee != FEE_HIGH) {
@@ -161,7 +154,7 @@ contract UniswapV3Adapter {
             deadline: deadline,
             amountIn: amountIn,
             amountOutMinimum: minAmountOut,
-            sqrtPriceLimitX96: 0
+            sqrtPriceLimitX96: sqrtPriceLimitX96
         });
 
         amountOut = swapRouter.exactInputSingle(params);

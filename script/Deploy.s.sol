@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Script.sol";
 import "../contracts/FlashLoanArbitrageV2.sol";
+import "../contracts/FlashLoanLiquidator.sol";
 import "../contracts/adapters/UniswapV3Adapter.sol";
 import "../contracts/adapters/UniswapV2Adapter.sol";
 import "../contracts/adapters/CurveAdapter.sol";
@@ -30,6 +31,7 @@ import "../contracts/BalancerFlashLoan.sol";
  *   V2_DEX_NAME              — Name for V2 adapter (e.g. "QuickSwap")
  *   MIN_PROFIT               — Minimum profit in token units (e.g. 100000 for 0.1 USDC)
  *   MAX_SLIPPAGE_BPS         — Max slippage in basis points (e.g. 200 for 2%)
+ *   LIQUIDATOR_MIN_PROFIT    — Minimum liquidation profit (defaults to MIN_PROFIT)
  *
  * Key management: Use `--account <name>` (Foundry encrypted keystore) instead
  * of storing PRIVATE_KEY in .env files. See: cast wallet import --help
@@ -45,6 +47,13 @@ contract DeployAll is Script {
         uint256 minProfit = vm.envOr("MIN_PROFIT", uint256(100000));
         uint256 maxSlippageBps = vm.envOr("MAX_SLIPPAGE_BPS", uint256(200));
         address balancerVault = vm.envOr("BALANCER_VAULT", address(0xBA12222222228d8Ba445958a75a0704d566BF2C8));
+        uint256 liquidatorMinProfit = vm.envOr("LIQUIDATOR_MIN_PROFIT", minProfit);
+
+        // ── Validate required addresses ───────────────────────
+        require(aaveProvider != address(0), "AAVE_POOL_PROVIDER not set");
+        require(v3Router != address(0), "UNISWAP_V3_ROUTER not set");
+        require(v3Quoter != address(0), "UNISWAP_V3_QUOTER not set");
+        require(v2Router != address(0), "V2_ROUTER not set");
 
         console.log("========================================");
         console.log("  FlashLoanArbitrageV2 Deployment");
@@ -92,23 +101,36 @@ contract DeployAll is Script {
         );
         console.log("BalancerFlashLoan deployed:", address(balancerArb));
 
-        // ── 6. Register all adapters on both flash loan contracts ──
+        // ── 6. Deploy FlashLoanLiquidator ─────────────────────
+        FlashLoanLiquidator liquidator = new FlashLoanLiquidator(
+            aaveProvider,
+            liquidatorMinProfit
+        );
+        console.log("FlashLoanLiquidator deployed:", address(liquidator));
+
+        // ── 7. Register all adapters on all flash loan contracts ──
         arb.setAdapter(address(v3Adapter), true);
         arb.setAdapter(address(v2Adapter), true);
         arb.setAdapter(address(curveAdapter), true);
         balancerArb.setAdapter(address(v3Adapter), true);
         balancerArb.setAdapter(address(v2Adapter), true);
         balancerArb.setAdapter(address(curveAdapter), true);
-        console.log("Adapters registered on both flash loan contracts");
+        liquidator.setAdapter(address(v3Adapter), true);
+        liquidator.setAdapter(address(v2Adapter), true);
+        liquidator.setAdapter(address(curveAdapter), true);
+        console.log("Adapters registered on all flash loan contracts");
 
-        // ── 7. Authorize both flash loan contracts on adapters ──
+        // ── 8. Authorize all flash loan contracts on adapters ──
         v3Adapter.setAuthorized(address(arb), true);
         v3Adapter.setAuthorized(address(balancerArb), true);
+        v3Adapter.setAuthorized(address(liquidator), true);
         v2Adapter.setAuthorized(address(arb), true);
         v2Adapter.setAuthorized(address(balancerArb), true);
+        v2Adapter.setAuthorized(address(liquidator), true);
         curveAdapter.setAuthorized(address(arb), true);
         curveAdapter.setAuthorized(address(balancerArb), true);
-        console.log("Both contracts authorized on adapters");
+        curveAdapter.setAuthorized(address(liquidator), true);
+        console.log("All contracts authorized on adapters");
 
         vm.stopBroadcast();
 
@@ -117,6 +139,7 @@ contract DeployAll is Script {
         console.log("========== DEPLOYMENT COMPLETE ==========");
         console.log("FlashLoanArbitrageV2:", address(arb));
         console.log("BalancerFlashLoan:   ", address(balancerArb));
+        console.log("FlashLoanLiquidator: ", address(liquidator));
         console.log("UniswapV3Adapter:    ", address(v3Adapter));
         console.log("UniswapV2Adapter:    ", address(v2Adapter));
         console.log("CurveAdapter:        ", address(curveAdapter));
@@ -124,6 +147,7 @@ contract DeployAll is Script {
         console.log("Add these to your .env:");
         console.log("  FLASH_LOAN_ARBITRAGE_ADDRESS=", address(arb));
         console.log("  BALANCER_FLASH_LOAN_ADDRESS=", address(balancerArb));
+        console.log("  FLASH_LOAN_LIQUIDATOR_ADDRESS=", address(liquidator));
         console.log("  UNISWAP_V3_ADAPTER_ADDRESS=", address(v3Adapter));
         console.log("  UNISWAP_V2_ADAPTER_ADDRESS=", address(v2Adapter));
         console.log("  CURVE_ADAPTER_ADDRESS=", address(curveAdapter));

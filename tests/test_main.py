@@ -30,7 +30,7 @@ def test_bot_initialization(bot):
     # Check default parameters
     assert bot.min_profit_threshold == Decimal("0.01")
     assert bot.max_trade_amount == Decimal("1.0")
-    assert bot.check_interval == 10
+    assert bot.check_interval == 5
 
     # Check statistics
     assert bot.opportunities_found == 0
@@ -299,8 +299,8 @@ async def test_execute_opportunity_risk_manager_blocks(bot):
 
 
 @pytest.mark.asyncio
-async def test_execute_opportunity_success(bot):
-    """Test successful opportunity execution."""
+async def test_execute_opportunity_dry_run(bot):
+    """Test opportunity execution in DRY_RUN mode."""
     opportunity = {
         "buy_dex": "quickswap",
         "sell_dex": "sushiswap",
@@ -311,29 +311,34 @@ async def test_execute_opportunity_success(bot):
         "expected_profit": Decimal("0.02"),
         "profit_percent": Decimal("0.02"),
         "buy_price": Decimal("2000"),
+        "sell_price": Decimal("2040"),
     }
+
+    # Mock web3 for is_profitable gas calculation
+    bot.web3 = Mock()
+    bot.web3.eth.gas_price = 30000000000
+    bot.token_list = {"WETH": {"address": "0xabc", "decimals": 18}}
+    bot.dex_instances = {}
 
     bot.risk_manager = AsyncMock()
     bot.risk_manager.validate_trade.return_value = (True, "OK")
     bot.risk_manager.record_trade_result = AsyncMock()
     bot.telegram_bot = AsyncMock()
 
-    await bot._execute_opportunity(opportunity)
+    with patch("src.bot.main._PrimaryConfig") as mock_config, \
+         patch("src.bot.main.is_profitable", new_callable=AsyncMock) as mock_prof:
+        mock_config.DRY_RUN = True
+        mock_prof.return_value = (True, Decimal("0.01"))
 
-    # Verify trade was attempted (but marked as not implemented)
+        await bot._execute_opportunity(opportunity)
+
     assert bot.trades_executed == 1
-    # Since execution is not implemented yet, it will be marked as failed
-    assert bot.failed_trades == 1
-
-    # Risk manager should record the failure
-    bot.risk_manager.record_trade_result.assert_called_once_with(
-        success=False, profit_loss=Decimal("0")
-    )
+    assert bot.successful_trades == 1
 
 
 @pytest.mark.asyncio
-async def test_execute_opportunity_failure(bot):
-    """Test failed opportunity execution."""
+async def test_execute_opportunity_not_profitable(bot):
+    """Test opportunity skipped when not profitable after gas."""
     opportunity = {
         "buy_dex": "quickswap",
         "sell_dex": "sushiswap",
@@ -341,26 +346,28 @@ async def test_execute_opportunity_failure(bot):
         "token_b": "USDC",
         "token_a_address": "0xabc",
         "amount": Decimal("1.0"),
-        "expected_profit": Decimal("0.02"),
+        "expected_profit": Decimal("0.001"),
         "profit_percent": Decimal("0.02"),
         "buy_price": Decimal("2000"),
+        "sell_price": Decimal("2002"),
     }
+
+    bot.web3 = Mock()
+    bot.web3.eth.gas_price = 30000000000
+    bot.token_list = {"WETH": {"address": "0xabc", "decimals": 18}}
 
     bot.risk_manager = AsyncMock()
     bot.risk_manager.validate_trade.return_value = (True, "OK")
     bot.risk_manager.record_trade_result = AsyncMock()
-    bot.telegram_bot = AsyncMock()
 
-    await bot._execute_opportunity(opportunity)
+    with patch("src.bot.main.is_profitable", new_callable=AsyncMock) as mock_prof:
+        mock_prof.return_value = (False, Decimal("-0.05"))
 
-    # Verify trade failed (execution not implemented)
-    assert bot.trades_executed == 1
-    assert bot.failed_trades == 1
-    assert bot.total_profit == Decimal("0")
+        await bot._execute_opportunity(opportunity)
 
-    bot.risk_manager.record_trade_result.assert_called_once_with(
-        success=False, profit_loss=Decimal("0")
-    )
+    # Trade attempted but rejected by profitability check — counter decremented back
+    assert bot.trades_executed == 0
+    assert bot.failed_trades == 0
 
 
 @pytest.mark.asyncio

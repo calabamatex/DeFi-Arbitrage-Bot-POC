@@ -3,6 +3,8 @@ pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 /**
  * @title IUniswapV2Router02
@@ -33,11 +35,8 @@ interface IUniswapV2Router02 {
  * @notice Adapter for executing swaps on Uniswap V2 and forks (SushiSwap, QuickSwap)
  * @dev Implements IDEXAdapter interface with access control (C-01, C-02)
  */
-contract UniswapV2Adapter {
+contract UniswapV2Adapter is Ownable2Step {
     using SafeERC20 for IERC20;
-
-    /// @notice Contract owner
-    address public owner;
 
     /// @notice Authorized callers (e.g., FlashLoanArbitrageV2)
     mapping(address => bool) public authorized;
@@ -50,25 +49,19 @@ contract UniswapV2Adapter {
 
     /// @notice Events
     event AuthorizedUpdated(address indexed account, bool status);
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     /// @notice Errors
     error Unauthorized();
-
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert Unauthorized();
-        _;
-    }
 
     modifier onlyAuthorized() {
         if (!authorized[msg.sender]) revert Unauthorized();
         _;
     }
 
-    constructor(address _router, string memory _dexName) {
+    constructor(address _router, string memory _dexName) Ownable(msg.sender) {
+        require(_router != address(0), "Invalid router");
         router = IUniswapV2Router02(_router);
         dexName = _dexName;
-        owner = msg.sender;
         authorized[msg.sender] = true;
     }
 
@@ -78,18 +71,9 @@ contract UniswapV2Adapter {
      * @param status True to authorize, false to revoke
      */
     function setAuthorized(address account, bool status) external onlyOwner {
+        require(account != address(0), "Invalid account");
         authorized[account] = status;
         emit AuthorizedUpdated(account, status);
-    }
-
-    /**
-     * @notice Transfer ownership
-     * @param newOwner New owner address
-     */
-    function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "Invalid owner");
-        emit OwnershipTransferred(owner, newOwner);
-        owner = newOwner;
     }
 
     /**

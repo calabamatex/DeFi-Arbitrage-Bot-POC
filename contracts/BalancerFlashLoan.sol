@@ -48,6 +48,12 @@ contract BalancerFlashLoan is IFlashLoanRecipient, Ownable, ReentrancyGuard, Pau
     /// @notice Balancer V2 Vault (same address on all chains)
     IBalancerVault public immutable VAULT;
 
+    /// @notice Maximum number of swap steps allowed
+    uint256 public constant MAX_STEPS = 10;
+
+    /// @notice Flash loan execution state flag (prevents unauthorized callbacks)
+    bool private _isExecuting;
+
     /// @notice Minimum profit required (in base token)
     uint256 public minProfit;
 
@@ -95,6 +101,7 @@ contract BalancerFlashLoan is IFlashLoanRecipient, Ownable, ReentrancyGuard, Pau
     event AdapterRegistered(address indexed adapter, bool status);
     event MinProfitUpdated(uint256 oldValue, uint256 newValue);
     event ProfitWithdrawn(address indexed token, uint256 amount, address indexed to);
+    event EmergencyWithdrawal(address indexed token, uint256 amount, address indexed to);
 
     /// @notice Errors
     error UnauthorizedAdapter(address adapter);
@@ -109,6 +116,7 @@ contract BalancerFlashLoan is IFlashLoanRecipient, Ownable, ReentrancyGuard, Pau
         uint256 _minProfit,
         uint256 _maxSlippageBps
     ) Ownable(msg.sender) {
+        require(_vault != address(0), "Invalid vault address");
         VAULT = IBalancerVault(_vault);
         minProfit = _minProfit;
         maxSlippageBps = _maxSlippageBps;
@@ -128,6 +136,7 @@ contract BalancerFlashLoan is IFlashLoanRecipient, Ownable, ReentrancyGuard, Pau
 
         if (block.timestamp > params.deadline) revert DeadlineExpired();
         if (params.steps.length == 0) revert InvalidPath();
+        require(params.steps.length <= MAX_STEPS, "Too many steps");
 
         // Validate all adapters
         for (uint256 i = 0; i < params.steps.length; i++) {
@@ -147,7 +156,9 @@ contract BalancerFlashLoan is IFlashLoanRecipient, Ownable, ReentrancyGuard, Pau
         bytes memory userData = abi.encode(params);
 
         // Execute Balancer flash loan
+        _isExecuting = true;
         VAULT.flashLoan(address(this), tokens, amounts, userData);
+        _isExecuting = false;
 
         executionCount++;
 
@@ -171,6 +182,7 @@ contract BalancerFlashLoan is IFlashLoanRecipient, Ownable, ReentrancyGuard, Pau
         bytes calldata userData
     ) external override {
         if (msg.sender != address(VAULT)) revert UnauthorizedCaller();
+        require(_isExecuting, "Not initiated by this contract");
 
         // Decode params
         ArbitrageParams memory arbParams = abi.decode(userData, (ArbitrageParams));
@@ -280,6 +292,12 @@ contract BalancerFlashLoan is IFlashLoanRecipient, Ownable, ReentrancyGuard, Pau
         address to
     ) external onlyOwner nonReentrant {
         IERC20(token).safeTransfer(to, amount);
+        if (totalProfits[token] > amount) {
+            totalProfits[token] -= amount;
+        } else {
+            totalProfits[token] = 0;
+        }
+        emit EmergencyWithdrawal(token, amount, to);
     }
 
     function getBalance(address token) external view returns (uint256) {

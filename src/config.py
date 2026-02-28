@@ -103,6 +103,17 @@ class Config:
     )
     MAX_PAIRS_PER_SCAN: int = int(os.getenv("MAX_PAIRS_PER_SCAN", "50"))
 
+    # MEV Protection
+    MEV_PROTECTION_ENABLED: bool = os.getenv("MEV_PROTECTION_ENABLED", "true").lower() == "true"
+    FLASHBOTS_RPC_URL: str = os.getenv("FLASHBOTS_RPC_URL", "https://rpc.flashbots.net")
+    FLASHBOTS_AUTH_KEY: Optional[str] = os.getenv("FLASHBOTS_AUTH_KEY")
+    PRIVATE_TX_MAX_WAIT: int = int(os.getenv("PRIVATE_TX_MAX_WAIT", "25"))
+
+    # Uniswap V3 addresses
+    UNISWAP_V3_ROUTER: Optional[str] = os.getenv("UNISWAP_V3_ROUTER")
+    UNISWAP_V3_FACTORY: Optional[str] = os.getenv("UNISWAP_V3_FACTORY")
+    UNISWAP_V3_QUOTER: Optional[str] = os.getenv("UNISWAP_V3_QUOTER")
+
     # Liquidation settings
     LIQUIDATION_ENABLED: bool = os.getenv("LIQUIDATION_ENABLED", "false").lower() == "true"
     LIQUIDATION_MIN_PROFIT_USD: float = float(os.getenv("LIQUIDATION_MIN_PROFIT_USD", "50"))
@@ -199,6 +210,14 @@ class Config:
             chain_config = cls.CHAINS.get(chain_name)
             if not chain_config or not chain_config.rpc_url:
                 errors.append(f"RPC URL not configured for chain: {chain_name}")
+
+        # MEV protection warning (non-fatal)
+        if cls.MEV_PROTECTION_ENABLED and not cls.FLASHBOTS_AUTH_KEY and cls.EXECUTION_MODE == "mainnet":
+            import warnings
+            warnings.warn(
+                "MEV_PROTECTION_ENABLED is true but FLASHBOTS_AUTH_KEY is not set. "
+                "Private transactions will not be authenticated on mainnet."
+            )
 
         if errors:
             raise ValueError(f"Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors))
@@ -318,6 +337,19 @@ def config_doctor():
     print(f"  MAX_GAS_PRICE_GWEI:       {config.MAX_GAS_PRICE_GWEI}")
     print(f"  MAX_FLASH_LOAN_AMOUNT_USD: {config.MAX_FLASH_LOAN_AMOUNT_USD}")
     print(f"  MAX_SLIPPAGE_PERCENTAGE:   {config.MAX_SLIPPAGE_PERCENTAGE}")
+
+    # MEV Protection
+    print(f"\n{C}[MEV Protection]{N}")
+    print(f"  ENABLED:         {config.MEV_PROTECTION_ENABLED}")
+    print(f"  FLASHBOTS_RPC:   {config.FLASHBOTS_RPC_URL}")
+    print(f"  AUTH_KEY:        {'set' if config.FLASHBOTS_AUTH_KEY else 'not set'}")
+    print(f"  MAX_WAIT:        {config.PRIVATE_TX_MAX_WAIT} blocks")
+
+    # Uniswap V3 Addresses
+    print(f"\n{C}[Uniswap V3 Addresses]{N}")
+    print(f"  ROUTER:          {config.UNISWAP_V3_ROUTER or 'not set'}")
+    print(f"  FACTORY:         {config.UNISWAP_V3_FACTORY or 'not set'}")
+    print(f"  QUOTER:          {config.UNISWAP_V3_QUOTER or 'not set'}")
 
     # Liquidation
     print(f"\n{C}[Liquidation]{N}")

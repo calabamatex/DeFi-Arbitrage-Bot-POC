@@ -173,4 +173,32 @@ contract FlashLoanArbitrageTest is Test {
         );
         arbitrage.executeArbitrage(params);
     }
+
+    function testRevertOnZeroAddressConstructor() public {
+        vm.expectRevert("Invalid address provider");
+        new FlashLoanArbitrage(address(0), MIN_PROFIT_USD, MAX_SLIPPAGE_BPS);
+    }
+
+    function testRevertOnArrayLengthMismatch() public {
+        // path has 3 elements, so dexRouters must have 2 (path.length - 1).
+        // Provide 1 router instead to trigger mismatch.
+        address[] memory routers = new address[](1);
+        routers[0] = address(0x123);
+
+        address[] memory path = new address[](3);
+        path[0] = USDC;
+        path[1] = WETH;
+        path[2] = USDC;
+
+        FlashLoanArbitrage.ArbitrageParams memory params = FlashLoanArbitrage.ArbitrageParams({
+            dexRouters: routers,
+            path: path,
+            amountIn: 1000e6,
+            minAmountOut: 1001e6,
+            deadline: block.timestamp + 1 hours
+        });
+
+        vm.expectRevert("Router/path length mismatch");
+        arbitrage.executeArbitrage(params);
+    }
 }

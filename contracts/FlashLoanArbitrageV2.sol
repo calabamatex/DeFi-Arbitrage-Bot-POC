@@ -31,6 +31,9 @@ contract FlashLoanArbitrageV2 is Ownable, ReentrancyGuard, Pausable {
     /// @notice Maximum slippage allowed (in basis points)
     uint256 public maxSlippageBps;
 
+    /// @notice Maximum number of swap steps
+    uint256 public constant MAX_STEPS = 10;
+
     /// @notice Flash loan fee (0.05% = 5 bps)
     uint256 public constant FLASH_LOAN_FEE_BPS = 5;
     uint256 public constant BPS_DENOMINATOR = 10000;
@@ -86,6 +89,7 @@ contract FlashLoanArbitrageV2 is Ownable, ReentrancyGuard, Pausable {
     event AdapterRegistered(address indexed adapter, bool status);
     event MinProfitUpdated(uint256 oldValue, uint256 newValue);
     event ProfitWithdrawn(address indexed token, uint256 amount, address indexed to);
+    event EmergencyWithdrawal(address indexed token, uint256 amount, address indexed to);
 
     /// @notice Errors
     error UnauthorizedAdapter(address adapter);
@@ -99,6 +103,7 @@ contract FlashLoanArbitrageV2 is Ownable, ReentrancyGuard, Pausable {
         uint256 _minProfit,
         uint256 _maxSlippageBps
     ) Ownable(msg.sender) {
+        require(_addressProvider != address(0), "Invalid address provider");
         ADDRESSES_PROVIDER = IPoolAddressesProvider(_addressProvider);
         POOL = IPool(ADDRESSES_PROVIDER.getPool());
         minProfit = _minProfit;
@@ -119,6 +124,7 @@ contract FlashLoanArbitrageV2 is Ownable, ReentrancyGuard, Pausable {
 
         if (block.timestamp > params.deadline) revert DeadlineExpired();
         if (params.steps.length == 0) revert InvalidPath();
+        require(params.steps.length <= MAX_STEPS, "Too many steps");
 
         // Validate all adapters are registered
         for (uint256 i = 0; i < params.steps.length; i++) {
@@ -249,6 +255,7 @@ contract FlashLoanArbitrageV2 is Ownable, ReentrancyGuard, Pausable {
      * @param status True to register, false to unregister
      */
     function setAdapter(address adapter, bool status) external onlyOwner {
+        require(adapter != address(0), "Invalid adapter address");
         registeredAdapters[adapter] = status;
         emit AdapterRegistered(adapter, status);
     }
@@ -297,6 +304,7 @@ contract FlashLoanArbitrageV2 is Ownable, ReentrancyGuard, Pausable {
         uint256 amount,
         address to
     ) external onlyOwner nonReentrant {
+        require(to != address(0), "Invalid recipient");
         require(amount <= totalProfits[token], "Insufficient profits");
 
         totalProfits[token] -= amount;
@@ -316,7 +324,16 @@ contract FlashLoanArbitrageV2 is Ownable, ReentrancyGuard, Pausable {
         uint256 amount,
         address to
     ) external onlyOwner nonReentrant {
+        require(to != address(0), "Invalid recipient");
         IERC20(token).safeTransfer(to, amount);
+
+        if (totalProfits[token] > amount) {
+            totalProfits[token] -= amount;
+        } else {
+            totalProfits[token] = 0;
+        }
+
+        emit EmergencyWithdrawal(token, amount, to);
     }
 
     /**

@@ -104,6 +104,7 @@ contract FlashLoanArbitrage is Ownable, ReentrancyGuard, Pausable {
         uint256 _minProfitUSD,
         uint256 _maxSlippageBps
     ) Ownable(msg.sender) {
+        require(_addressProvider != address(0), "Invalid address provider");
         ADDRESSES_PROVIDER = IPoolAddressesProvider(_addressProvider);
         POOL = IPool(ADDRESSES_PROVIDER.getPool());
         minProfitUSD = _minProfitUSD;
@@ -132,6 +133,9 @@ contract FlashLoanArbitrage is Ownable, ReentrancyGuard, Pausable {
         if (params.path.length < 3 || params.path[0] != params.path[params.path.length - 1]) {
             revert InvalidPath();
         }
+
+        // Validate DEX routers count matches path segments
+        require(params.dexRouters.length == params.path.length - 1, "Router/path length mismatch");
 
         // Validate DEX routers are whitelisted
         for (uint256 i = 0; i < params.dexRouters.length; i++) {
@@ -207,7 +211,7 @@ contract FlashLoanArbitrage is Ownable, ReentrancyGuard, Pausable {
 
         // Verify profit after repayment
         if (finalAmount <= amountOwed) {
-            revert InsufficientProfit(finalAmount - amountOwed, minProfitUSD);
+            revert InsufficientProfit(0, minProfitUSD);
         }
 
         uint256 profit = finalAmount - amountOwed;
@@ -302,6 +306,7 @@ contract FlashLoanArbitrage is Ownable, ReentrancyGuard, Pausable {
      * @param status True to whitelist, false to remove
      */
     function setDEXWhitelist(address dex, bool status) external onlyOwner {
+        require(dex != address(0), "Invalid DEX address");
         whitelistedDEXs[dex] = status;
         emit DEXWhitelisted(dex, status);
     }
@@ -368,6 +373,7 @@ contract FlashLoanArbitrage is Ownable, ReentrancyGuard, Pausable {
         uint256 amount,
         address to
     ) external onlyOwner nonReentrant {
+        require(to != address(0), "Invalid recipient");
         require(amount <= totalProfits[token], "Insufficient profits");
 
         totalProfits[token] -= amount;
@@ -387,11 +393,19 @@ contract FlashLoanArbitrage is Ownable, ReentrancyGuard, Pausable {
         uint256 amount,
         address to
     ) external nonReentrant {
+        require(to != address(0), "Invalid recipient");
         if (!emergencyWithdrawers[msg.sender]) {
             revert Unauthorized();
         }
 
         IERC20(token).safeTransfer(to, amount);
+
+        if (totalProfits[token] > amount) {
+            totalProfits[token] -= amount;
+        } else {
+            totalProfits[token] = 0;
+        }
+
         emit EmergencyWithdrawal(token, amount, to);
     }
 

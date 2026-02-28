@@ -16,7 +16,14 @@ from src.bot.config import load_config, get_erc20_abi
 from src.dex.quickswap import QuickSwap
 from src.dex.sushiswap import SushiSwap
 from src.dex.uniswap_v3 import UniswapV3
-from src.bot.arbitrage import execute_arbitrage, calculate_arbitrage
+from src.bot.arbitrage import (
+    execute_arbitrage,
+    calculate_arbitrage,
+    ArbitrageOpportunity,
+    is_profitable,
+    log_arbitrage_attempt,
+)
+from src.config import Config as _PrimaryConfig
 from src.utils.transaction_manager import TransactionManager
 from src.utils.risk_manager import RiskManager
 from src.utils.slippage_protection import SlippageProtection
@@ -54,7 +61,7 @@ class ArbitrageBot:
         # Trading parameters
         self.min_profit_threshold = Decimal("0.01")  # 1% minimum profit
         self.max_trade_amount = Decimal("1.0")  # Max 1 ETH per trade
-        self.check_interval = 10  # Check every 10 seconds
+        self.check_interval = 5  # Check every 5 seconds
 
         # Statistics
         self.start_time = datetime.now()
@@ -101,6 +108,7 @@ class ArbitrageBot:
             logger.info("Step 1/11: Loading configuration...")
             full_config, env_name, env_config, token_list = load_config()
             self.config = env_config  # Store environment-specific config
+            self.token_list = token_list
 
             # 2. Load environment variables
             logger.info("Step 2/11: Loading environment variables...")
@@ -138,14 +146,19 @@ class ArbitrageBot:
                 "sushiswap": SushiSwap(
                     router_address=self.config["SUSHISWAP_ROUTER"], name="SushiSwap"
                 ),
-                # TODO: UniswapV3 requires factory and quoter addresses
-                # "uniswap_v3": UniswapV3(
-                #     router_address=self.config["UNISWAP_V3_ROUTER"],
-                #     factory_address="...",  # Need to add to config
-                #     quoter_address="...",    # Need to add to config
-                #     name="UniswapV3"
-                # ),
             }
+
+            v3_router = os.getenv("UNISWAP_V3_ROUTER")
+            v3_factory = os.getenv("UNISWAP_V3_FACTORY")
+            v3_quoter = os.getenv("UNISWAP_V3_QUOTER")
+
+            if v3_router and v3_factory and v3_quoter:
+                self.dex_instances["uniswap_v3"] = UniswapV3(
+                    router_address=v3_router,
+                    factory_address=v3_factory,
+                    quoter_address=v3_quoter,
+                    name="UniswapV3",
+                )
             logger.info(f"Initialized {len(self.dex_instances)} DEX adapters")
 
             # 6. Initialize Telegram bot
@@ -239,7 +252,7 @@ class ArbitrageBot:
         """
         Main trading loop - continuously monitors for opportunities.
 
-        Checks token pairs every 10 seconds for arbitrage opportunities.
+        Checks token pairs every 5 seconds for arbitrage opportunities.
         Scores and prioritizes opportunities, then executes the best one.
         """
         logger.info("Starting main trading loop...")
@@ -270,20 +283,45 @@ class ArbitrageBot:
 
                     for token_a, token_b in self.token_pairs:
                         try:
-                            # TODO: Implement opportunity finding logic
-                            # This will call calculate_arbitrage for each DEX pair combination
-                            # For now, we just log that we're checking
                             logger.debug(
                                 f"Checking {token_a}/{token_b} for arbitrage opportunities..."
                             )
 
-                            # opportunities = []  # Placeholder
-                            # For each pair of DEXes, calculate arbitrage opportunity
-                            # if opportunity found, add to opportunities list
+                            result = await calculate_arbitrage(
+                                token_a,
+                                token_b,
+                                self.web3,
+                                self.dex_instances,
+                                self.token_list,
+                            )
 
-                            # if opportunities:
-                            #     all_opportunities.extend(opportunities)
-                            #     logger.info(f"Found {len(opportunities)} opportunities for {token_a}/{token_b}")
+                            if result is not None:
+                                token_a_address = self.token_list.get(
+                                    token_a, {}
+                                ).get("address", "")
+                                opp_dict = {
+                                    "token_a": result.token1,
+                                    "token_b": result.token2,
+                                    "buy_dex": result.buy_dex,
+                                    "sell_dex": result.sell_dex,
+                                    "profit_percent": Decimal(
+                                        str(result.profit_percent)
+                                    ),
+                                    "expected_profit": result.expected_profit,
+                                    "amount": result.amount,
+                                    "buy_price": result.buy_price,
+                                    "sell_price": result.sell_price,
+                                    "token_a_address": token_a_address,
+                                    "gas_estimate": 300000,
+                                    "liquidity": Decimal("1.0"),
+                                    "confidence": Decimal("0.8"),
+                                }
+                                all_opportunities.append(opp_dict)
+                                logger.info(
+                                    f"Found opportunity for {token_a}/{token_b}: "
+                                    f"{result.buy_dex} -> {result.sell_dex}, "
+                                    f"profit: {result.profit_percent:.2%}"
+                                )
 
                         except Exception as e:
                             logger.error(f"Error checking {token_a}/{token_b}: {e}")
@@ -412,10 +450,61 @@ class ArbitrageBot:
             # Execute the arbitrage trade
             self.trades_executed += 1
 
-            # TODO: Call execute_arbitrage function with proper parameters
-            # For now, mark as not implemented
-            logger.warning("Arbitrage execution not yet fully implemented")
-            result = {"success": False, "error": "Execution not yet implemented"}
+            # Reconstruct ArbitrageOpportunity dataclass from the dict
+            opp = ArbitrageOpportunity(
+                token1=token_a,
+                token2=token_b,
+                buy_dex=buy_dex,
+                sell_dex=sell_dex,
+                expected_profit=expected_profit,
+                amount=amount,
+                buy_price=opportunity.get("buy_price", Decimal("0")),
+                sell_price=opportunity.get("sell_price", Decimal("0")),
+                timestamp=datetime.now(),
+            )
+
+            # Check profitability after gas costs
+            profitable, net_profit = await is_profitable(
+                opp, self.web3, self.min_profit_threshold
+            )
+            if not profitable:
+                logger.info(
+                    f"Opportunity not profitable after gas (net: {net_profit:.6f}), skipping"
+                )
+                self.trades_executed -= 1  # Don't count skipped trades
+                return
+
+            # Dry-run mode: simulate without executing on-chain
+            if _PrimaryConfig.DRY_RUN:
+                logger.info(
+                    f"[DRY_RUN] Would execute {token_a}/{token_b} "
+                    f"via {buy_dex} -> {sell_dex}, "
+                    f"expected net profit: {net_profit:.6f}"
+                )
+                result = {
+                    "success": True,
+                    "tx_hash": "DRY_RUN_SIMULATED",
+                    "error": "",
+                    "profit": net_profit,
+                }
+                await log_arbitrage_attempt(opp, True, "dry-run simulation", net_profit)
+            else:
+                # Live execution
+                success, message, actual_profit = await execute_arbitrage(
+                    opp,
+                    self.web3,
+                    self.dex_instances,
+                    self.token_list,
+                    self.account.address,
+                    self.private_key,
+                )
+                result = {
+                    "success": success,
+                    "tx_hash": message if success else "",
+                    "error": message if not success else "",
+                    "profit": actual_profit,
+                }
+                await log_arbitrage_attempt(opp, success, message, actual_profit)
 
             # Process result
             if result.get("success"):
