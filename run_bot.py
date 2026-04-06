@@ -375,6 +375,29 @@ def main():
         max_flash_loan=int(os.getenv("MAX_FLASH_LOAN_USD", "100000")) * 10**6,
     )
 
+    # Initialize TransactionManager for nonce locking and retry
+    from src.utils.transaction_manager import TransactionManager
+    tx_manager = TransactionManager(
+        web3=web3,
+        account=web3.eth.account.from_key(private_key).address,
+        private_key=private_key,
+    )
+
+    # Initialize MEV protection (Flashbots) if configured
+    mev_protection = None
+    flashbots_url = os.getenv("FLASHBOTS_RPC_URL")
+    if flashbots_url:
+        try:
+            from src.utils.mev_protection import FlashbotsProvider
+            mev_protection = FlashbotsProvider(
+                web3=web3,
+                private_key=private_key,
+                flashbots_url=flashbots_url,
+            )
+            logger.info(f"MEV protection enabled via {flashbots_url}")
+        except Exception as e:
+            logger.warning(f"MEV protection init failed (continuing without): {e}")
+
     orchestrator = FlashLoanOrchestrator(
         web3=web3,
         contract_address=contract_address,
@@ -382,6 +405,8 @@ def main():
         v3_adapter_address=v3_adapter,
         v2_adapter_address=v2_adapter,
         dry_run=dry_run,
+        mev_protection=mev_protection,
+        tx_manager=tx_manager,
     )
 
     risk_config = {

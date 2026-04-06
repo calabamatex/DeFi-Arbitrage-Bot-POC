@@ -1,7 +1,13 @@
-"""Multicall for batching RPC requests."""
+"""
+Multicall3 for batching RPC requests.
+
+Reduces hundreds of sequential RPC calls to a handful of batched calls.
+Multicall3 is deployed at the same address on all major EVM chains.
+"""
 
 from web3 import Web3
-from typing import List, Tuple, Any
+from web3.contract import Contract
+from typing import List, Tuple, Optional, Any
 import logging
 
 logger = logging.getLogger(__name__)
@@ -66,74 +72,33 @@ MULTICALL_ABI = [
 
 
 class Multicall:
-    """Batch multiple RPC calls into a single request."""
+    """Batch multiple RPC calls into a single request via Multicall3."""
+
+    # Maximum calls per batch to avoid gas limit issues
+    MAX_BATCH_SIZE = 100
 
     def __init__(self, web3: Web3, multicall_address: str = MULTICALL_ADDRESS):
-        """
-        Initialize multicall.
-
-        Args:
-            web3: Web3 instance
-            multicall_address: Multicall3 contract address
-        """
         self.web3 = web3
         self.multicall_address = multicall_address
+        self.contract: Optional[Contract] = None
 
         try:
             self.contract = web3.eth.contract(
-                address=multicall_address, abi=MULTICALL_ABI
+                address=web3.to_checksum_address(multicall_address),
+                abi=MULTICALL_ABI,
             )
-            logger.info(f"Multicall initialized at {multicall_address}")
+            logger.info(f"Multicall3 initialized at {multicall_address}")
         except Exception as e:
-            logger.warning(f"Multicall contract not available: {e}")
-            self.contract = None
+            logger.warning(f"Multicall3 contract not available: {e}")
 
-    async def aggregate(
-        self, calls: List[Tuple[str, bytes]]
-    ) -> Tuple[int, List[bytes]]:
-        """
-        Execute multiple calls in a single RPC request.
+    def is_available(self) -> bool:
+        return self.contract is not None
 
-        All calls must succeed or the entire multicall reverts.
-
-        Args:
-            calls: List of (target_address, call_data) tuples
-
-        Returns:
-            Tuple of (block_number, list of return data bytes)
-        """
-        if not self.contract:
-            raise ValueError("Multicall contract not available")
-
-        # Format calls
-        formatted_calls = [
-            {"target": target, "callData": data} for target, data in calls
-        ]
-
-        logger.debug(f"Multicall aggregating {len(calls)} calls")
-
-        # Execute multicall
-        try:
-            block_number, return_data = self.contract.functions.aggregate(
-                formatted_calls
-            ).call()
-
-            logger.debug(
-                f"Multicall successful: block {block_number}, {len(return_data)} results"
-            )
-            return block_number, return_data
-
-        except Exception as e:
-            logger.error(f"Multicall aggregate failed: {e}")
-            raise
-
-    async def aggregate3(
+    def aggregate3(
         self, calls: List[Tuple[str, bytes, bool]]
     ) -> List[Tuple[bool, bytes]]:
         """
         Execute multiple calls with individual failure handling.
-
-        Each call can succeed or fail independently.
 
         Args:
             calls: List of (target_address, call_data, allow_failure) tuples
@@ -142,61 +107,116 @@ class Multicall:
             List of (success, return_data) tuples
         """
         if not self.contract:
-            raise ValueError("Multicall contract not available")
+            raise ValueError("Multicall3 contract not available")
 
-        # Format calls
         formatted_calls = [
             {"target": target, "allowFailure": allow_failure, "callData": data}
             for target, data, allow_failure in calls
         ]
 
-        logger.debug(f"Multicall aggregate3: {len(calls)} calls")
+        logger.debug(f"Multicall3 aggregate3: {len(calls)} calls")
 
-        # Execute multicall
-        try:
-            results = self.contract.functions.aggregate3(formatted_calls).call()
+        results = self.contract.functions.aggregate3(formatted_calls).call()
 
-            logger.debug(f"Multicall3 successful: {len(results)} results")
+        logger.debug(f"Multicall3 returned {len(results)} results")
+        return [(r["success"], r["returnData"]) for r in results]
 
-            # Convert to tuple format
-            return [(result["success"], result["returnData"]) for result in results]
+    def aggregate3_chunked(
+        self, calls: List[Tuple[str, bytes, bool]]
+    ) -> List[Tuple[bool, bytes]]:
+        """
+        Execute calls in chunks to avoid gas limit issues.
 
-        except Exception as e:
-            logger.error(f"Multicall aggregate3 failed: {e}")
-            raise
+        Splits large batches into MAX_BATCH_SIZE chunks and concatenates results.
+        """
+        if len(calls) <= self.MAX_BATCH_SIZE:
+            return self.aggregate3(calls)
 
-    def is_available(self) -> bool:
-        """Check if multicall is available."""
-        return self.contract is not None
+        all_results = []
+        for i in range(0, len(calls), self.MAX_BATCH_SIZE):
+            chunk = calls[i : i + self.MAX_BATCH_SIZE]
+            results = self.aggregate3(chunk)
+            all_results.extend(results)
+
+        return all_results
 
 
-async def batch_get_prices(
+# ---------------------------------------------------------------------------
+# ABI encoding helpers for common DEX quote calls
+# ---------------------------------------------------------------------------
+
+def encode_v3_quote(
     web3: Web3,
-    dex_routers: List[str],
-    token_addresses: List[str],
-    multicall: Multicall,
-) -> List[bytes]:
+    quoter_contract: Contract,
+    token_in: str,
+    token_out: str,
+    amount_in: int,
+    fee: int,
+) -> bytes:
     """
-    Batch multiple getAmountsOut calls using multicall.
+    Encode a Uniswap V3 QuoterV2.quoteExactInputSingle call.
 
-    Args:
-        web3: Web3 instance
-        dex_routers: List of DEX router addresses
-        token_addresses: List of token pair addresses
-        multicall: Multicall instance
-
-    Returns:
-        List of encoded results
+    Returns raw calldata bytes suitable for Multicall3.
     """
-    # Build calls
-    calls = []
+    params = {
+        "tokenIn": token_in,
+        "tokenOut": token_out,
+        "amountIn": amount_in,
+        "fee": fee,
+        "sqrtPriceLimitX96": 0,
+    }
+    return quoter_contract.functions.quoteExactInputSingle(params)._encode_transaction_data()
 
-    # Example: getAmountsOut for multiple DEXes
-    # This would need the actual ABI and encoding
 
-    logger.info(f"Batching {len(calls)} price queries")
+def encode_v2_amounts_out(
+    web3: Web3,
+    router_contract: Contract,
+    amount_in: int,
+    path: List[str],
+) -> bytes:
+    """
+    Encode a UniswapV2 Router.getAmountsOut call.
 
-    # Execute multicall
-    _, results = await multicall.aggregate(calls)
+    Returns raw calldata bytes suitable for Multicall3.
+    """
+    return router_contract.functions.getAmountsOut(amount_in, path)._encode_transaction_data()
 
-    return results
+
+def decode_v3_quote_result(result_data: bytes) -> Optional[int]:
+    """
+    Decode the return data from quoteExactInputSingle.
+
+    Returns amountOut or None if data is invalid.
+    """
+    if not result_data or len(result_data) < 32:
+        return None
+    try:
+        # quoteExactInputSingle returns (uint256 amountOut, uint160, uint32, uint256)
+        # First 32 bytes = amountOut
+        amount_out = int.from_bytes(result_data[:32], "big")
+        return amount_out if amount_out > 0 else None
+    except Exception:
+        return None
+
+
+def decode_v2_amounts_out_result(result_data: bytes) -> Optional[int]:
+    """
+    Decode the return data from getAmountsOut.
+
+    Returns the final output amount or None if data is invalid.
+    """
+    if not result_data or len(result_data) < 128:
+        return None
+    try:
+        # getAmountsOut returns uint256[] (dynamic array)
+        # Layout: offset (32) + length (32) + element0 (32) + element1 (32)
+        offset = int.from_bytes(result_data[:32], "big")
+        length = int.from_bytes(result_data[offset : offset + 32], "big")
+        if length < 2:
+            return None
+        # Last element is the output amount
+        last_offset = offset + 32 + (length - 1) * 32
+        amount_out = int.from_bytes(result_data[last_offset : last_offset + 32], "big")
+        return amount_out if amount_out > 0 else None
+    except Exception:
+        return None
