@@ -13,6 +13,9 @@ alembic>=1.13.0
 # HTTP / async
 aiohttp>=3.9.0
 
+# WebSocket (optional — enables event-driven block scanning)
+websockets>=12.0
+
 # Structured logging
 python-json-logger>=2.0.0
 

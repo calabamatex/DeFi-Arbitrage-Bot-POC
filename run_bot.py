@@ -93,6 +93,10 @@ class ArbitrageBot:
             'risk_rejections': 0,
         }
 
+        # WebSocket block listener (event-driven scanning)
+        self.block_event = threading.Event()
+        self.block_listener = None  # Set by main() if WS URL configured
+
         logger.info("ArbitrageBot initialized with risk management and metrics")
         logger.info(f"Direct execution mode: {direct_execution}")
 
@@ -152,9 +156,14 @@ class ArbitrageBot:
                     logger.error(f"Detector loop error: {e}")
                     self.metrics.record_error(str(e))
 
+                # Wait for next scan trigger:
+                # - If BlockListener is active: wake on new block (near-instant)
+                # - Otherwise: fall back to timer-based polling
                 import random
                 jitter = random.uniform(0, self.detector.check_interval * 0.5)
-                time.sleep(self.detector.check_interval + jitter)
+                timeout = self.detector.check_interval + jitter
+                self.block_event.wait(timeout=timeout)
+                self.block_event.clear()
 
         except KeyboardInterrupt:
             logger.info("Detector loop stopped by user")
@@ -258,6 +267,8 @@ class ArbitrageBot:
     def stop(self):
         """Stop the bot and export final metrics."""
         self.running = False
+        if self.block_listener:
+            self.block_listener.stop()
         try:
             self.metrics.collect_metrics(risk_manager=self.risk_manager)
             self.metrics.export_metrics_json('metrics_final.json')
@@ -433,6 +444,24 @@ def main():
         gas_optimizer=gas_optimizer,
         direct_execution=direct_execution,
     )
+
+    # Start WebSocket block listener if WS URL is configured
+    chain_cfg = Config.CHAINS.get(args.chain)
+    ws_url = chain_cfg.ws_rpc_url if chain_cfg else None
+    if not ws_url:
+        ws_url = os.getenv(f"{args.chain.upper()}_RPC_WS_URL")
+
+    if ws_url:
+        from src.utils.block_listener import BlockListener
+        block_listener = BlockListener(
+            ws_url=ws_url,
+            block_event=bot.block_event,
+        )
+        bot.block_listener = block_listener
+        block_listener.start()
+        logger.info(f"WebSocket block listener started ({ws_url[:50]}...)")
+    else:
+        logger.info("No WS RPC URL configured — using timer-based polling")
 
     # Start health/metrics HTTP server
     from src.api.health import start_health_server

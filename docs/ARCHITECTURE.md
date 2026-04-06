@@ -113,9 +113,18 @@ FlashLoanArbitrageV2
     └── withdrawProfit(token, to)    [owner-only]
 ```
 
+## Scan Trigger Modes
+
+The bot supports two scan trigger modes, selected automatically based on configuration:
+
+### Event-Driven (WebSocket)
+When a `*_RPC_WS_URL` environment variable is set, the bot starts a `BlockListener` daemon thread (`src/utils/block_listener.py`) that subscribes to `newHeads` via WebSocket. Each new block sets a `threading.Event`, waking the scan loop immediately. This eliminates wasted polls between blocks and reduces detection latency to near-instant (~0.1-1s after block production).
+
+### Timer-Based (Polling Fallback)
+Without a WebSocket URL, or if the WebSocket connection fails after `max_retries`, the bot falls back to `event.wait(timeout=check_interval)` which behaves identically to the original `time.sleep()` polling every 5-7.5 seconds.
+
 ## Known Limitations
 
-1. **Sequential RPC calls** - The detector makes 600+ sequential HTTP calls per scan. Multicall3 batching infrastructure exists (`src/utils/multicall.py`) but is not yet wired into the detector.
-2. **No WebSocket subscriptions** - Detection uses polling (every 5s), not event-driven block subscriptions.
-3. **No Flashbots integration in execution** - MEV protection module exists but is not connected to the orchestrator's transaction submission path.
-4. **Single admin key** - No multi-sig support for contract ownership.
+1. **Single admin key** - No multi-sig support for contract ownership.
+2. **No formal security audit** - Contracts reviewed with Slither only.
+3. **Python GIL** - Single-threaded scan execution. Adequate since the bottleneck is network I/O, not CPU.
