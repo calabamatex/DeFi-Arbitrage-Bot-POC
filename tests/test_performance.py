@@ -411,3 +411,128 @@ async def test_cache_performance_benefit():
     print(f"  Without cache: {no_cache_time:.3f}s")
     print(f"  With cache: {cached_time:.3f}s")
     print(f"  Speedup: {no_cache_time/cached_time:.1f}x")
+
+
+class TestMulticallBatching:
+    """Test that Multicall3 batching reduces RPC call count."""
+
+    def test_batched_fewer_rpc_calls(self):
+        """
+        Verify calculate_arbitrage_batched() makes fewer RPC calls than
+        sequential calculate_arbitrage().
+
+        Sequential: 8 individual RPC calls (3 V3 fees + 1 V2 per direction)
+        Batched: 2 Multicall3 aggregate3() calls
+        """
+        from src.opportunity_detector import OpportunityDetector
+        from src.utils.multicall import Multicall
+
+        # Create detector with mocked web3
+        mock_web3 = Mock()
+        mock_web3.to_checksum_address = lambda x: x
+        mock_web3.eth.chain_id = 137
+        mock_web3.eth.gas_price = 30 * 10**9
+        mock_web3.to_wei = lambda val, unit: val * 10**9 if unit == "gwei" else val
+
+        # Track RPC calls
+        rpc_call_count = {"sequential": 0, "batched": 0}
+
+        # Mock V3 quoter — each .call() is one RPC
+        mock_v3_result = [1000 * 10**6, 0, 0, 200000]  # amountOut, sqrtPrice, ticks, gas
+        mock_v3_fn = Mock()
+        mock_v3_fn.call = Mock(return_value=mock_v3_result)
+        mock_v3_contract = Mock()
+        mock_v3_contract.functions.quoteExactInputSingle = Mock(return_value=mock_v3_fn)
+
+        # Mock V2 router
+        mock_v2_result = [500 * 10**6, 1050 * 10**6]  # [amountIn, amountOut]
+        mock_v2_fn = Mock()
+        mock_v2_fn.call = Mock(return_value=mock_v2_result)
+        mock_v2_contract = Mock()
+        mock_v2_contract.functions.getAmountsOut = Mock(return_value=mock_v2_fn)
+
+        # Count sequential calls
+        original_v3_call = mock_v3_fn.call
+        original_v2_call = mock_v2_fn.call
+
+        def count_v3(*args, **kwargs):
+            rpc_call_count["sequential"] += 1
+            return original_v3_call(*args, **kwargs)
+
+        def count_v2(*args, **kwargs):
+            rpc_call_count["sequential"] += 1
+            return original_v2_call(*args, **kwargs)
+
+        mock_v3_fn.call = count_v3
+        mock_v2_fn.call = count_v2
+
+        # Patch detector construction to use mocks
+        with patch.object(OpportunityDetector, "__init__", lambda self, **kw: None):
+            detector = OpportunityDetector.__new__(OpportunityDetector)
+            detector.web3 = mock_web3
+            detector.v3_quoter = "0xQuoter"
+            detector.v2_router = "0xRouter"
+            detector.v3_quoter_contract = mock_v3_contract
+            detector.v2_router_contract = mock_v2_contract
+            detector.curve_adapter_contract = None
+            detector.V3_FEE_LOW = 500
+            detector.V3_FEE_MEDIUM = 3000
+            detector.V3_FEE_HIGH = 10000
+            detector.FLASH_LOAN_FEE_BPS = 5
+            detector.multicall = Mock(spec=Multicall)
+            detector.multicall.is_available.return_value = False  # Force sequential
+
+            # Run sequential
+            token_a = "0xTokenA"
+            token_b = "0xTokenB"
+            detector.calculate_arbitrage(token_a, token_b, 1000 * 10**6)
+            sequential_calls = rpc_call_count["sequential"]
+
+        # Now test batched path — Multicall3 should make exactly 2 aggregate3 calls
+        mock_multicall = Mock(spec=Multicall)
+        mock_multicall.is_available.return_value = True
+
+        # Mock aggregate3 to return successful results
+        # Batch 1: 4 calls (3 V3 + 1 V2)
+        batch1_results = [
+            (True, (1000 * 10**6).to_bytes(32, "big") + b"\x00" * 96),  # V3 fee 500
+            (True, (1000 * 10**6).to_bytes(32, "big") + b"\x00" * 96),  # V3 fee 3000
+            (True, (1000 * 10**6).to_bytes(32, "big") + b"\x00" * 96),  # V3 fee 10000
+            (True, b"\x00" * 32 + (2).to_bytes(32, "big") + (500 * 10**6).to_bytes(32, "big") + (1050 * 10**6).to_bytes(32, "big")),  # V2
+        ]
+        # Batch 2: dependent calls
+        batch2_results = [
+            (True, b"\x00" * 32 + (2).to_bytes(32, "big") + (1000 * 10**6).to_bytes(32, "big") + (1005 * 10**6).to_bytes(32, "big")),  # V2 B->A
+            (True, (1005 * 10**6).to_bytes(32, "big") + b"\x00" * 96),  # V3 B->A fee 500
+            (True, (1005 * 10**6).to_bytes(32, "big") + b"\x00" * 96),  # V3 B->A fee 3000
+            (True, (1005 * 10**6).to_bytes(32, "big") + b"\x00" * 96),  # V3 B->A fee 10000
+        ]
+
+        mock_multicall.aggregate3.side_effect = [batch1_results, batch2_results]
+
+        with patch.object(OpportunityDetector, "__init__", lambda self, **kw: None):
+            detector2 = OpportunityDetector.__new__(OpportunityDetector)
+            detector2.web3 = mock_web3
+            detector2.v3_quoter = "0xQuoter"
+            detector2.v2_router = "0xRouter"
+            detector2.v3_quoter_contract = mock_v3_contract
+            detector2.v2_router_contract = mock_v2_contract
+            detector2.curve_adapter_contract = None
+            detector2.V3_FEE_LOW = 500
+            detector2.V3_FEE_MEDIUM = 3000
+            detector2.V3_FEE_HIGH = 10000
+            detector2.FLASH_LOAN_FEE_BPS = 5
+            detector2.multicall = mock_multicall
+
+            detector2.calculate_arbitrage_batched(token_a, token_b, 1000 * 10**6)
+            batched_calls = mock_multicall.aggregate3.call_count
+
+        print(f"\nRPC call comparison:")
+        print(f"  Sequential: {sequential_calls} individual RPC calls")
+        print(f"  Batched: {batched_calls} Multicall3 aggregate3() calls")
+        print(f"  Reduction: {sequential_calls}x -> {batched_calls}x ({sequential_calls / max(batched_calls, 1):.0f}x fewer)")
+
+        # Batched should use significantly fewer calls
+        assert batched_calls <= 2, f"Expected at most 2 Multicall3 calls, got {batched_calls}"
+        assert sequential_calls >= 6, f"Expected at least 6 sequential calls, got {sequential_calls}"
+

@@ -91,7 +91,7 @@ jobs:
             --cov=src \
             --cov-report=xml:coverage.xml \
             --cov-report=term \
-            --ignore=tests/test_main.py \
+            -m "not integration" \
             -x
 
       - name: Upload coverage

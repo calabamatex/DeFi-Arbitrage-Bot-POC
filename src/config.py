@@ -29,6 +29,7 @@ class ChainConfig:
     rpc_url: str
     explorer_url: str
     native_token: str
+    ws_rpc_url: Optional[str] = None
     flash_loan_contract: Optional[str] = None
     min_profit_usd: float = 10.0
     max_gas_price_gwei: float = 100.0
@@ -138,6 +139,7 @@ class Config:
             chain_id=137,
             name="Polygon",
             rpc_url=os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com"),
+            ws_rpc_url=os.getenv("POLYGON_RPC_WS_URL"),
             explorer_url="https://polygonscan.com",
             native_token="MATIC",
         ),
@@ -145,6 +147,7 @@ class Config:
             chain_id=42161,
             name="Arbitrum One",
             rpc_url=os.getenv("ARBITRUM_RPC_URL", "https://arb1.arbitrum.io/rpc"),
+            ws_rpc_url=os.getenv("ARBITRUM_RPC_WS_URL"),
             explorer_url="https://arbiscan.io",
             native_token="ETH",
         ),
@@ -152,6 +155,7 @@ class Config:
             chain_id=10,
             name="Optimism",
             rpc_url=os.getenv("OPTIMISM_RPC_URL", "https://mainnet.optimism.io"),
+            ws_rpc_url=os.getenv("OPTIMISM_RPC_WS_URL"),
             explorer_url="https://optimistic.etherscan.io",
             native_token="ETH",
         ),
@@ -159,6 +163,7 @@ class Config:
             chain_id=8453,
             name="Base",
             rpc_url=os.getenv("BASE_RPC_URL", "https://mainnet.base.org"),
+            ws_rpc_url=os.getenv("BASE_RPC_WS_URL"),
             explorer_url="https://basescan.org",
             native_token="ETH",
         ),
@@ -167,6 +172,7 @@ class Config:
             chain_id=80002,
             name="Polygon Amoy Testnet",
             rpc_url=os.getenv("POLYGON_AMOY_RPC_URL", "https://rpc-amoy.polygon.technology"),
+            ws_rpc_url=os.getenv("POLYGON_AMOY_RPC_WS_URL"),
             explorer_url="https://amoy.polygonscan.com",
             native_token="MATIC",
         ),
@@ -174,6 +180,7 @@ class Config:
             chain_id=421614,
             name="Arbitrum Sepolia Testnet",
             rpc_url=os.getenv("ARBITRUM_SEPOLIA_RPC_URL", "https://sepolia-rollup.arbitrum.io/rpc"),
+            ws_rpc_url=os.getenv("ARBITRUM_SEPOLIA_RPC_WS_URL"),
             explorer_url="https://sepolia.arbiscan.io",
             native_token="ETH",
         ),

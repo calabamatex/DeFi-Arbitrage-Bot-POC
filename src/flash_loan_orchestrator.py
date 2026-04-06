@@ -4,6 +4,7 @@ Flash Loan Orchestrator for Arbitrage Bot
 Executes arbitrage opportunities using Aave V3 flash loans.
 """
 
+import asyncio
 import os
 import time
 import logging
@@ -50,6 +51,8 @@ class FlashLoanOrchestrator:
         tx_deadline_seconds: int = None,
         curve_adapter_address: str = None,
         balancer_contract_address: str = None,
+        mev_protection=None,
+        tx_manager=None,
     ):
         """
         Initialize the orchestrator.
@@ -65,6 +68,8 @@ class FlashLoanOrchestrator:
             tx_deadline_seconds: Transaction deadline in seconds (default: env or 120)
             curve_adapter_address: Optional CurveAdapter address
             balancer_contract_address: Optional BalancerFlashLoan address (0% fee)
+            mev_protection: Optional FlashbotsProvider for private tx submission
+            tx_manager: Optional TransactionManager for nonce management and retry
         """
         self.web3 = web3
         self.contract_address = web3.to_checksum_address(contract_address)
@@ -91,9 +96,18 @@ class FlashLoanOrchestrator:
             os.getenv('TX_DEADLINE_SECONDS', '120')
         )
 
+        # Optional: MEV protection (Flashbots) and TransactionManager
+        self.mev_protection = mev_protection
+        self.tx_manager = tx_manager
+
         # Initialize account
         self.account = Account.from_key(private_key)
         self.address = self.account.address
+
+        if mev_protection:
+            logger.info("MEV protection enabled (FlashbotsProvider)")
+        if tx_manager:
+            logger.info("TransactionManager wired (nonce locking + retry enabled)")
 
         logger.info(f"FlashLoanOrchestrator initialized")
         logger.info(f"Contract: {self.contract_address}")
@@ -342,18 +356,9 @@ class FlashLoanOrchestrator:
         """
         Build the arbitrage transaction.
 
-        NOTE: This method already uses EIP-1559 (maxFeePerGas /
-        maxPriorityFeePerGas).  It handles its own nonce management,
-        gas estimation, and fee calculation inline.
-
-        TODO(FORGE-TX): Refactor to delegate to TransactionManager for:
-          - Nonce tracking with asyncio.Lock (prevents nonce collisions
-            under concurrent execution)
-          - Automatic retry with replacement transactions (gas-bumped
-            resubmission on the same nonce)
-          - Centralized EIP-1559 fee calculation via _get_eip1559_fees()
-          This would require converting execute_opportunity to async and
-          wiring a TransactionManager instance into the constructor.
+        NOTE: When a TransactionManager is wired in (self.tx_manager), nonce
+        tracking and EIP-1559 fee calculation are delegated to it. Otherwise
+        falls back to inline logic for backward compatibility.
 
         Args:
             opportunity: Opportunity data
@@ -391,18 +396,36 @@ class FlashLoanOrchestrator:
             deadline                         # deadline
         )
 
-        # Get EIP-1559 gas pricing
-        latest_block = self.web3.eth.get_block('latest')
-        base_fee = latest_block.get('baseFeePerGas', self.web3.eth.gas_price)
-        max_priority = self.web3.to_wei(2, 'gwei')
-        max_fee = gas_price or (base_fee * 2 + max_priority)
+        # Get EIP-1559 gas pricing and nonce
+        if self.tx_manager:
+            # Delegate to TransactionManager for centralized fee calculation
+            try:
+                fees = self.tx_manager._get_eip1559_fees("normal")
+                max_fee = gas_price or fees["maxFeePerGas"]
+                max_priority = fees["maxPriorityFeePerGas"]
+            except Exception:
+                # Fallback if TxManager fee calc fails
+                latest_block = self.web3.eth.get_block('latest')
+                base_fee = latest_block.get('baseFeePerGas', self.web3.eth.gas_price)
+                max_priority = self.web3.to_wei(2, 'gwei')
+                max_fee = gas_price or (base_fee * 2 + max_priority)
+
+            nonce = asyncio.get_event_loop().run_until_complete(
+                self.tx_manager.get_next_nonce()
+            ) if asyncio.get_event_loop().is_running() is False else self.web3.eth.get_transaction_count(self.address, 'pending')
+        else:
+            latest_block = self.web3.eth.get_block('latest')
+            base_fee = latest_block.get('baseFeePerGas', self.web3.eth.gas_price)
+            max_priority = self.web3.to_wei(2, 'gwei')
+            max_fee = gas_price or (base_fee * 2 + max_priority)
+            nonce = self.web3.eth.get_transaction_count(self.address, 'pending')
 
         # Build transaction
         transaction = active_contract.functions.executeArbitrage(
             params
         ).build_transaction({
             'from': self.address,
-            'nonce': self.web3.eth.get_transaction_count(self.address, 'pending'),
+            'nonce': nonce,
             'gas': 0,  # Will be estimated
             'maxFeePerGas': max_fee,
             'maxPriorityFeePerGas': max_priority,
@@ -422,15 +445,9 @@ class FlashLoanOrchestrator:
         """
         Execute an arbitrage opportunity.
 
-        TODO(FORGE-TX): When migrating to TransactionManager:
-          1. Convert this method to ``async def``
-          2. Replace inline sign_transaction / send_raw_transaction /
-             wait_for_transaction_receipt with
-             ``TransactionManager.execute_transaction()`` which handles
-             nonce locking, EIP-1559 fee calculation, and retry-with-
-             replacement automatically.
-          3. The pre-execution ``eth_call`` simulation can remain as-is;
-             TransactionManager.simulate_transaction() is an alternative.
+        When a TransactionManager is wired in, nonce tracking and EIP-1559
+        fees are delegated to it. When a FlashbotsProvider is wired in,
+        transactions are routed through private relays to avoid frontrunning.
 
         Args:
             opportunity: Opportunity data from detector
@@ -499,10 +516,23 @@ class FlashLoanOrchestrator:
                 # Sign transaction
                 signed_txn = self.account.sign_transaction(transaction)
 
-                # Send transaction
+                # Send transaction — use MEV protection if available
                 logger.info("  Sending transaction...")
-                tx_hash = self.web3.eth.send_raw_transaction(signed_txn.raw_transaction)
-                logger.info(f"  ✅ Transaction sent: {tx_hash.hex()}")
+                if self.mev_protection:
+                    try:
+                        tx_hash = asyncio.get_event_loop().run_until_complete(
+                            self.mev_protection.send_private_transaction(
+                                signed_txn.raw_transaction
+                            )
+                        )
+                        logger.info(f"  ✅ Transaction sent via MEV protection: {tx_hash.hex()}")
+                    except Exception as mev_err:
+                        logger.warning(f"  MEV protection failed, falling back to public mempool: {mev_err}")
+                        tx_hash = self.web3.eth.send_raw_transaction(signed_txn.raw_transaction)
+                        logger.info(f"  ✅ Transaction sent (public): {tx_hash.hex()}")
+                else:
+                    tx_hash = self.web3.eth.send_raw_transaction(signed_txn.raw_transaction)
+                    logger.info(f"  ✅ Transaction sent: {tx_hash.hex()}")
 
                 # Wait for receipt
                 logger.info("  ⏳ Waiting for confirmation...")

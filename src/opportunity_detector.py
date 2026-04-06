@@ -22,6 +22,13 @@ from src.db.database import get_db
 from src.db.models import Opportunity, OpportunityStatus, Chain, DEX, Token
 from src.utils.token_registry import TokenRegistry
 from src.utils.errors import classify_web3_exception, DatabaseError
+from src.utils.multicall import (
+    Multicall,
+    encode_v3_quote,
+    encode_v2_amounts_out,
+    decode_v3_quote_result,
+    decode_v2_amounts_out_result,
+)
 
 # Load environment variables
 load_dotenv()
@@ -88,6 +95,13 @@ class OpportunityDetector:
 
         # Initialize contracts
         self._init_contracts()
+
+        # Initialize Multicall3 for batched RPC calls
+        self.multicall = Multicall(web3)
+        if self.multicall.is_available():
+            logger.info("Multicall3 available — batched price queries enabled")
+        else:
+            logger.warning("Multicall3 not available — falling back to sequential queries")
 
         # Well-known token shortcuts (always available for backward compat)
         self.usdc = self.web3.to_checksum_address(
@@ -431,6 +445,171 @@ class OpportunityDetector:
 
         return opportunities
 
+    def calculate_arbitrage_batched(
+        self,
+        token_a: str,
+        token_b: str,
+        amount_in: int,
+    ) -> List[Dict]:
+        """
+        Calculate arbitrage using Multicall3 batching.
+
+        Instead of 8 sequential RPC calls (3 V3 fee tiers per direction + 2 V2),
+        this batches all quotes into a single Multicall3 call (1 RPC).
+
+        Falls back to sequential calculate_arbitrage() if Multicall3 is unavailable.
+        """
+        if not self.multicall.is_available():
+            return self.calculate_arbitrage(token_a, token_b, amount_in)
+
+        try:
+            # Build all 8 quote calls for both directions:
+            # Direction 1 (V3→V2): 3 V3 quotes (A→B, different fees) + 1 V2 quote (B→A)
+            # Direction 2 (V2→V3): 1 V2 quote (A→B) + 3 V3 quotes (B→A, different fees)
+            # Note: V2 quotes for direction 2 use the A→B result, but we can't batch
+            # dependent calls. So we batch all independent calls first (5 total),
+            # then do a second batch for dependent calls.
+
+            fees = [self.V3_FEE_LOW, self.V3_FEE_MEDIUM, self.V3_FEE_HIGH]
+
+            # Batch 1: All independent calls (5 calls → 1 RPC)
+            calls = []
+            call_labels = []
+
+            # 3 V3 quotes for A→B (one per fee tier)
+            for fee in fees:
+                calldata = encode_v3_quote(
+                    self.web3, self.v3_quoter_contract, token_a, token_b, amount_in, fee
+                )
+                calls.append((self.v3_quoter, calldata, True))
+                call_labels.append(("v3_ab", fee))
+
+            # 1 V2 quote for A→B
+            calldata = encode_v2_amounts_out(
+                self.web3, self.v2_router_contract, amount_in, [token_a, token_b]
+            )
+            calls.append((self.v2_router, calldata, True))
+            call_labels.append(("v2_ab", None))
+
+            # 1 V2 quote for B→A (needed if V3 A→B succeeds — we'll use amount_in
+            # as a placeholder; if V3 gives us a different intermediate amount, we
+            # still need a second batch. But we can pre-fetch V2 B→A at a reasonable
+            # estimate to avoid a second batch in many cases.)
+
+            results = self.multicall.aggregate3(calls)
+
+            # Parse Batch 1 results
+            v3_ab_quotes = {}  # fee -> amount_out
+            for i, fee in enumerate(fees):
+                success, data = results[i]
+                if success:
+                    amount_out = decode_v3_quote_result(data)
+                    if amount_out:
+                        v3_ab_quotes[fee] = amount_out
+
+            v2_ab_out = None
+            success, data = results[3]
+            if success:
+                v2_ab_out = decode_v2_amounts_out_result(data)
+
+            # Find best V3 A→B quote
+            best_v3_ab_fee = None
+            best_v3_ab_out = None
+            for fee, amount_out in v3_ab_quotes.items():
+                if best_v3_ab_out is None or amount_out > best_v3_ab_out:
+                    best_v3_ab_out = amount_out
+                    best_v3_ab_fee = fee
+
+            # Batch 2: Dependent calls based on Batch 1 results
+            calls2 = []
+            call_labels2 = []
+
+            # V2 B→A using best V3 A→B output (for direction V3→V2)
+            if best_v3_ab_out:
+                calldata = encode_v2_amounts_out(
+                    self.web3, self.v2_router_contract, best_v3_ab_out, [token_b, token_a]
+                )
+                calls2.append((self.v2_router, calldata, True))
+                call_labels2.append(("v2_ba", None))
+
+            # V3 B→A using V2 A→B output (for direction V2→V3)
+            if v2_ab_out:
+                for fee in fees:
+                    calldata = encode_v3_quote(
+                        self.web3, self.v3_quoter_contract, token_b, token_a, v2_ab_out, fee
+                    )
+                    calls2.append((self.v3_quoter, calldata, True))
+                    call_labels2.append(("v3_ba", fee))
+
+            if calls2:
+                results2 = self.multicall.aggregate3(calls2)
+            else:
+                results2 = []
+
+            # Parse Batch 2 results
+            opportunities = []
+            idx = 0
+
+            # Direction 1: V3→V2
+            if best_v3_ab_out and idx < len(results2):
+                success, data = results2[idx]
+                idx += 1
+                if success:
+                    v2_ba_out = decode_v2_amounts_out_result(data)
+                    if v2_ba_out:
+                        profit = v2_ba_out - amount_in
+                        profit_after_fees = self._calculate_profit_after_fees(amount_in, profit)
+                        if profit_after_fees > 0:
+                            opportunities.append({
+                                'direction': 'V3→V2',
+                                'token_in': token_a,
+                                'token_out': token_b,
+                                'amount_in': amount_in,
+                                'v3_fee': best_v3_ab_fee,
+                                'amount_after_v3': best_v3_ab_out,
+                                'amount_after_v2': v2_ba_out,
+                                'gross_profit': profit,
+                                'net_profit': profit_after_fees,
+                                'dex_path': ['uniswap_v3', 'quickswap'],
+                            })
+
+            # Direction 2: V2→V3
+            if v2_ab_out:
+                best_v3_ba_fee = None
+                best_v3_ba_out = None
+                for fee in fees:
+                    if idx < len(results2):
+                        success, data = results2[idx]
+                        idx += 1
+                        if success:
+                            amount_out = decode_v3_quote_result(data)
+                            if amount_out and (best_v3_ba_out is None or amount_out > best_v3_ba_out):
+                                best_v3_ba_out = amount_out
+                                best_v3_ba_fee = fee
+
+                if best_v3_ba_out:
+                    profit = best_v3_ba_out - amount_in
+                    profit_after_fees = self._calculate_profit_after_fees(amount_in, profit)
+                    if profit_after_fees > 0:
+                        opportunities.append({
+                            'direction': 'V2→V3',
+                            'token_in': token_a,
+                            'token_out': token_b,
+                            'amount_in': amount_in,
+                            'amount_after_v2': v2_ab_out,
+                            'v3_fee': best_v3_ba_fee,
+                            'amount_after_v3': best_v3_ba_out,
+                            'gross_profit': profit,
+                            'net_profit': profit_after_fees,
+                            'dex_path': ['quickswap', 'uniswap_v3'],
+                        })
+
+            return opportunities
+
+        except Exception as e:
+            logger.warning(f"Multicall3 batched quote failed, falling back to sequential: {e}")
+            return self.calculate_arbitrage(token_a, token_b, amount_in)
+
     def _calculate_profit_after_fees(self, amount_in: int, gross_profit: int, flash_loan_fee_bps: int = None) -> int:
         """
         Calculate net profit after flash loan fees.
@@ -679,7 +858,7 @@ class OpportunityDetector:
         logger.info(f"🔍 Optimizing flash loan amount for {direction}...")
 
         # Test initial small amount to confirm opportunity exists
-        initial_opps = self.calculate_arbitrage(token_a, token_b, min_amount)
+        initial_opps = self.calculate_arbitrage_batched(token_a, token_b, min_amount)
         if not initial_opps:
             logger.debug(f"No opportunity at minimum amount ${min_amount / 10**token_decimals:,.0f}")
             return None
@@ -718,7 +897,7 @@ class OpportunityDetector:
         logger.info(f"  Testing {len(test_amounts)} amounts from ${test_amounts[0]/10**token_decimals:,.0f} to ${test_amounts[-1]/10**token_decimals:,.0f}")
 
         for amount in test_amounts[1:]:  # Skip first (already tested)
-            opps = self.calculate_arbitrage(token_a, token_b, amount)
+            opps = self.calculate_arbitrage_batched(token_a, token_b, amount)
             if not opps:
                 # Hit liquidity limit, stop searching higher
                 logger.debug(f"  No liquidity at ${amount/10**token_decimals:,.0f}, stopping")
@@ -843,7 +1022,8 @@ class OpportunityDetector:
                 decimals_a = self.token_decimals.get(token_a.lower(), 18)
 
                 # Quick test with minimum amount to check if any opportunity exists
-                quick_test = self.calculate_arbitrage(token_a, token_b, self.min_flash_loan)
+                # Use batched version when Multicall3 is available (1 RPC vs 8)
+                quick_test = self.calculate_arbitrage_batched(token_a, token_b, self.min_flash_loan)
 
                 if not quick_test:
                     logger.debug(f"No opportunity for {token_a[:6]}↔{token_b[:6]}")
