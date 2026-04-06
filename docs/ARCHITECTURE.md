@@ -2,259 +2,120 @@
 
 ## Overview
 
-The arbitrage bot is a modular system with clear separation of concerns:
+The bot has two independent execution paths sharing common infrastructure:
 
 ```
-┌─────────────────────────────────────────────────┐
-│              Main Orchestrator                  │
-│           (src/bot/main.py)                     │
-└─────────────────┬───────────────────────────────┘
-                  │
-        ┌─────────┴─────────┐
-        │                   │
-        ▼                   ▼
-┌──────────────┐    ┌──────────────┐
-│     DEX      │    │   Arbitrage  │
-│  Adapters    │    │    Logic     │
-└──────────────┘    └──────────────┘
-        │                   │
-        └─────────┬─────────┘
-                  │
-        ┌─────────┴─────────┐
-        │                   │
-        ▼                   ▼
-┌──────────────┐    ┌──────────────┐
-│     Risk     │    │ Transaction  │
-│  Management  │    │   Manager    │
-└──────────────┘    └──────────────┘
+                    ┌─────────────────────────┐
+                    │      run_bot.py          │
+                    │    (ArbitrageBot)        │
+                    └────────────┬────────────┘
+                                 │
+              ┌──────────────────┼──────────────────┐
+              │                  │                   │
+              ▼                  ▼                   ▼
+    ┌──────────────────┐  ┌───────────────┐  ┌──────────────┐
+    │ OpportunityDetector│  │ RiskManager   │  │ GasOptimizer │
+    │ (price scanning)  │  │ (circuit      │  │ (EIP-1559)   │
+    └────────┬─────────┘  │  breaker,     │  └──────────────┘
+             │             │  loss limits) │
+             ▼             └───────────────┘
+    ┌──────────────────┐
+    │ FlashLoanOrch.   │
+    │ (tx building &   │
+    │  submission)     │
+    └────────┬─────────┘
+             │
+             ▼
+    ┌──────────────────────────────────────────┐
+    │         ON-CHAIN (Solidity)               │
+    │                                           │
+    │  FlashLoanArbitrageV2.sol                │
+    │    ├── Aave V3 flash loan callback       │
+    │    ├── N-step swap execution              │
+    │    └── Profit verification & repayment    │
+    │                                           │
+    │  DEX Adapters (IDEXAdapter interface)     │
+    │    ├── UniswapV3Adapter (fee tiers)       │
+    │    ├── UniswapV2Adapter (QuickSwap/Sushi) │
+    │    └── CurveAdapter (stablecoins)         │
+    └──────────────────────────────────────────┘
 ```
 
-## Core Components
+## Entry Points
 
-### 1. Main Orchestrator (`src/bot/main.py`)
-- Initializes all components
-- Runs main trading loop
-- Coordinates opportunity detection and execution
-- Handles graceful shutdown
+| Command | System | Description |
+|---------|--------|-------------|
+| `python run_bot.py --chain polygon` | Arbitrage | Flash loan arbitrage bot (primary) |
+| `python run_liquidation_bot.py` | Liquidation | Aave V3 liquidation bot (separate) |
 
-### 2. DEX Adapters (`src/dex/`)
-- **Uniswap V3**: Concentrated liquidity, multiple fee tiers
-- **SushiSwap**: Uniswap V2 fork
-- **QuickSwap**: Uniswap V2 fork, Polygon-native
+## Execution Flow (Arbitrage)
 
-Each adapter implements:
-- `get_token_price()` - Fetch current price
-- `execute_trade()` - Execute swap
-- `get_liquidity_depth()` - Check available liquidity
+1. **OpportunityDetector.scan_opportunities()** queries Uniswap V3 Quoter and V2 Router contracts for price quotes across configured token pairs
+2. For each pair, it tests both directions (V3->V2 and V2->V3) across multiple fee tiers
+3. Profitable opportunities pass to **ArbitrageBot.execute_opportunity()** which gates on the **RiskManager** (position limits, circuit breaker, daily loss)
+4. **FlashLoanOrchestrator.execute_opportunity()** builds the on-chain transaction:
+   - Selects flash loan provider (Aave V3 at 0.05% or Balancer at 0%)
+   - Constructs SwapStep[] (adapter address, tokens, minAmountOut per step)
+   - Simulates via `eth_call` before submission
+   - Signs and submits (or logs in dry-run mode)
+5. **FlashLoanArbitrageV2.sol** receives the flash loan callback, executes all swap steps through adapters, verifies profit exceeds minimum, and repays the loan atomically
 
-### 3. Arbitrage Logic (`src/bot/arbitrage.py`)
-- Fetches prices from all DEXes concurrently
-- Identifies price discrepancies
-- Calculates expected profit
-- Accounts for gas costs
-- Validates profitability
+## Execution Flow (Liquidation)
 
-### 4. Risk Management (`src/utils/risk_manager.py`)
+1. **LiquidationDetector** discovers Aave V3 borrowers via recent block events
+2. Checks `getUserAccountData()` for health factors < 1.0
+3. Calculates liquidation bonus profit minus flash loan fee and swap costs
+4. **LiquidationOrchestrator** executes via **FlashLoanLiquidator.sol**
 
-Five-layer protection:
+## Key Components
 
-1. **BalanceValidator** - Ensures sufficient funds
-2. **PositionManager** - Enforces size/exposure limits
-3. **LossTracker** - Monitors P/L, enforces loss limits
-4. **CircuitBreaker** - Stops trading after consecutive losses
-5. **RiskManager** - Coordinates all risk checks
+### Detection Layer
+- **OpportunityDetector** (`src/opportunity_detector.py`) - Scans DEX prices, calculates profitability after fees
+- **LiquidationDetector** (`src/liquidation_detector.py`) - Monitors Aave V3 health factors
 
-### 5. Transaction Management (`src/utils/transaction_manager.py`)
-- Thread-safe nonce management
-- Transaction building and signing
-- Confirmation monitoring
-- Retry logic
+### Execution Layer
+- **FlashLoanOrchestrator** (`src/flash_loan_orchestrator.py`) - Builds and submits flash loan arbitrage transactions
+- **LiquidationOrchestrator** (`src/liquidation_orchestrator.py`) - Builds and submits liquidation transactions
+- **FlashLoanSelector** (`src/flash_loan_providers.py`) - Chooses Aave V3 vs Balancer based on token availability
 
-### 6. Slippage Protection (`src/utils/slippage_protection.py`)
-- Calculates minimum acceptable output
-- Validates execution price
-- Estimates price impact
-- Determines safe trade sizes
+### Risk & Safety
+- **RiskManager** (`src/utils/risk_manager.py`) - Circuit breaker, position limits, daily loss tracking
+- **SlippageProtection** (`src/utils/slippage_protection.py`) - Price impact estimation, minimum output calculation
+- **GasOptimizer** (`src/utils/gas_optimizer.py`) - EIP-1559 fee estimation with urgency tiers
+- **MEVProtection** (`src/utils/mev_protection.py`) - Flashbots Protect integration for private tx submission
+- **EmergencyShutdown** (`src/utils/emergency_shutdown.py`) - Admin-triggered halt with Telegram alerts
 
-### 7. Emergency Shutdown (`src/utils/emergency_shutdown.py`)
-- Automatic triggers (loss limits, etc.)
-- Manual emergency stop
-- Admin-protected reset
-- Telegram alerts
+### Infrastructure
+- **TransactionManager** (`src/utils/transaction_manager.py`) - Nonce management, signing, retry with gas bumps
+- **MetricsCollector** (`src/utils/metrics_collector.py`) - Prometheus metrics export
+- **HealthServer** (`src/api/health.py`) - Liveness/readiness probes, metrics endpoint
+- **Database** (`src/db/`) - PostgreSQL + TimescaleDB for opportunity and trade logging
 
-### 8. Metrics Collection (`src/utils/metrics_collector.py`)
-- Tracks all bot activity
-- Records opportunities, trades, profits/losses
-- Monitors performance metrics
-- Exports to JSON and Prometheus formats
+## Smart Contract Design
 
-### 9. Performance Monitoring (`src/utils/performance_monitor.py`)
-- Tracks detection and execution times
-- Monitors RPC call rates
-- Measures memory and CPU usage
-- Validates against performance targets
-
-## Data Flow
-
-### Opportunity Detection Flow
+The adapter pattern decouples the core flash loan logic from DEX-specific swap mechanics:
 
 ```
-1. Main loop triggers detection
-2. For each token pair:
-   a. Fetch prices from all DEXes (parallel)
-   b. Find min/max prices
-   c. Calculate gross profit
-   d. Subtract gas costs
-   e. Validate profitability
-3. Score and prioritize opportunities
-4. Return best opportunities
+FlashLoanArbitrageV2
+    │
+    ├── executeArbitrage(params)     [owner-only, nonReentrant]
+    │     ├── Request flash loan from Aave V3 Pool
+    │     └── executeOperation()     [callback from Aave]
+    │           ├── For each SwapStep:
+    │           │     ├── Approve adapter for tokenIn
+    │           │     ├── adapter.swap(tokenIn, tokenOut, amount, minOut, data)
+    │           │     └── Verify actual balance >= minAmountOut
+    │           ├── Verify final balance >= loanAmount + fee + minProfit
+    │           └── Approve Pool to reclaim loan + fee
+    │
+    ├── registerAdapter(addr)        [owner-only]
+    ├── pause() / unpause()          [owner-only]
+    └── withdrawProfit(token, to)    [owner-only]
 ```
 
-### Trade Execution Flow
+## Known Limitations
 
-```
-1. Risk manager validates trade
-   - Check balance
-   - Check position size
-   - Check exposure limits
-   - Check loss limits
-   - Check circuit breaker
-2. If approved:
-   a. Approve tokens (if needed)
-   b. Execute buy trade
-   c. Execute sell trade
-   d. Record results
-3. Update all trackers
-4. Send notifications
-```
-
-## Design Decisions
-
-### Why Polygon?
-- Lower gas costs than Ethereum
-- Less MEV bot competition
-- Fast block times (2s)
-- Growing DeFi ecosystem
-
-### Why These DEXes?
-- **Uniswap V3**: Most liquidity, price leader
-- **SushiSwap**: Second-most liquidity
-- **QuickSwap**: Polygon-native, different user base
-
-### Why Async/Await?
-- Parallel price fetching (3x faster)
-- Non-blocking I/O operations
-- Better resource utilization
-
-### Why Multiple Risk Layers?
-- Defense in depth
-- No single point of failure
-- Progressive warnings before shutdown
-
-## Performance Optimizations
-
-1. **Price Caching** - 3-second cache reduces RPC calls
-2. **Connection Pooling** - Reuse HTTP connections
-3. **Parallel Fetching** - `asyncio.gather()` for prices
-4. **Token Approvals** - Approve unlimited once
-5. **Gas Optimization** - EIP-1559 for better pricing
-6. **Multicall** - Batch RPC requests
-7. **Rolling Windows** - Keep only recent metrics data
-
-## Security Measures
-
-1. **No hardcoded keys** - All secrets in .env
-2. **Input validation** - All user inputs validated
-3. **Error handling** - Comprehensive try/catch
-4. **Logging** - Security events logged
-5. **Rate limiting** - Prevent RPC abuse
-6. **Circuit breakers** - Auto-stop on losses
-7. **Emergency shutdown** - Multiple safety triggers
-
-## Testing Strategy
-
-- **Unit Tests**: Individual components (30+ tests)
-- **Integration Tests**: Component interactions (9 tests)
-- **Testnet Tests**: Real blockchain validation
-- **Performance Tests**: Speed/efficiency benchmarks
-- **Edge Case Tests**: Boundary conditions
-
-Target: >90% code coverage
-
-## Deployment Architecture
-
-### Testnet
-```
-Developer Machine
-  ├── Bot Process
-  ├── Logs (local files)
-  └── Metrics (local files)
-```
-
-### Mainnet (Recommended)
-```
-Cloud Server (VPS)
-  ├── Bot Process (systemd service)
-  ├── Logs (rotated daily)
-  ├── Metrics (exported hourly)
-  └── Monitoring (Prometheus/Grafana)
-```
-
-## Component Dependencies
-
-```
-Main Orchestrator
-  ├── DEX Adapters (QuickSwap, SushiSwap, UniswapV3)
-  ├── Risk Manager
-  │   ├── Balance Validator
-  │   ├── Position Manager
-  │   ├── Loss Tracker
-  │   └── Circuit Breaker
-  ├── Transaction Manager
-  ├── Slippage Protection
-  ├── Emergency Shutdown
-  ├── Opportunity Scorer
-  ├── Metrics Collector
-  ├── Performance Monitor
-  └── Telegram Bot
-```
-
-## Future Enhancements
-
-Potential improvements:
-- Cross-chain arbitrage
-- Flash loan integration
-- MEV protection
-- Machine learning for opportunity prediction
-- Multi-account support
-- Advanced order types
-- Dynamic gas pricing
-- Liquidity aggregation
-
-## Technical Stack
-
-- **Language**: Python 3.9+
-- **Blockchain**: Web3.py 7.7.0
-- **Async**: asyncio
-- **Testing**: pytest, pytest-asyncio
-- **Formatting**: Black
-- **Type Checking**: mypy (optional)
-- **Monitoring**: Prometheus metrics
-- **Notifications**: python-telegram-bot
-
-## Key Design Patterns
-
-1. **Strategy Pattern**: DEX adapters
-2. **Factory Pattern**: Configuration loading
-3. **Observer Pattern**: Event notifications
-4. **Singleton Pattern**: RiskManager, MetricsCollector
-5. **Decorator Pattern**: Performance monitoring
-6. **Command Pattern**: Emergency shutdown
-
-## Error Handling Philosophy
-
-- **Fail gracefully**: Never crash the bot
-- **Log everything**: All errors logged with context
-- **Alert on critical**: Emergency shutdown triggers alerts
-- **Retry logic**: Network errors get retries
-- **Circuit breakers**: Auto-stop on repeated failures
+1. **Sequential RPC calls** - The detector makes 600+ sequential HTTP calls per scan. Multicall3 batching infrastructure exists (`src/utils/multicall.py`) but is not yet wired into the detector.
+2. **No WebSocket subscriptions** - Detection uses polling (every 5s), not event-driven block subscriptions.
+3. **No Flashbots integration in execution** - MEV protection module exists but is not connected to the orchestrator's transaction submission path.
+4. **Single admin key** - No multi-sig support for contract ownership.
