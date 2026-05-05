@@ -1,3 +1,7 @@
+# Preamble
+This repo was created based upon a challenge from a collegue. The challnege was to create a functional crypto arbitrage bot though vibe coding. Why a crypto arbitrage bot? Becasue of the complexity of architecting/coding such a system in tradiotnal methods, hence a extreme challenge for vibe coding. The project was a chllenge given the state of vibe coding at the time. Does this repo succedd in its ambitions? Yes, mostly, though to fully implement this bot at scale requires additional hardware, netoworking, etc that is outside of what can be vibe coded. This bot does work on testnets, though it not a sufficient proof point for working on active networks. I am not actively using this repo and do not plan updates.  
+
+
 # Flash Loan Arbitrage Bot
 
 A DeFi trading system that captures arbitrage spreads across decentralized exchanges using flash loans (zero upfront capital). Built as an educational project to demonstrate smart contract development, DeFi protocol integration, and MEV-aware bot architecture.
