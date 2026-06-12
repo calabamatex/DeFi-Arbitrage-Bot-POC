@@ -1,3 +1,5 @@
+![DeFi-Arbitrage](docs/DeFi_Arbitrage_Bot_Case_Study.png)
+
 # Preamble
 This repo was created based upon a challenge from a colleague. The challenge was to create a functional crypto arbitrage bot through vibe coding. Why a crypto arbitrage bot? Because of the complexity of architecting/coding such a system using traditional methods, hence an extreme challenge for vibe coding. The project was a challenge given the state of vibe coding at the time. Does this repo succeed in its ambitions? Yes, mostly, though fully implementing this bot at scale requires additional hardware, networking, etc which is outside what can be vibe coded. This bot works on testnets, though it not a sufficient proof point for working on active networks. I am not actively using this repo and do not plan updates. My receommendation is *NOT* to use this bot directly form this repo due to previously mentioned aspects of scale, speed, and age of this repo. Read the Lesson Learned section below for additional information.
 
